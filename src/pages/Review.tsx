@@ -2,8 +2,8 @@ import { useState, useMemo, useCallback, useEffect } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
-import { ArrowLeft, FileCode, Loader2, Sparkles, Calendar, MessageSquare, User, Users, GitPullRequest, RefreshCw, ClipboardList, AlertTriangle, BookOpen, Files, ChevronDown, Check, CheckCircle2, XCircle, MessageCircle, Eye, EyeOff, Plus, Send, Filter, History, Pencil, Trash2, X } from "lucide-react";
-import { github, GitHubFile, GitHubPR, review } from "@/lib/api";
+import { ArrowLeft, FileCode, Loader2, Sparkles, Calendar, MessageSquare, User, Users, GitPullRequest, RefreshCw, ClipboardList, AlertTriangle, BookOpen, Files, ChevronDown, Check, CheckCircle2, XCircle, MessageCircle, Eye, EyeOff, Plus, Send, Filter, History, Pencil, Trash2, X, Shield, Layers, Paintbrush, Zap } from "lucide-react";
+import { github, GitHubFile, GitHubPR, review, ai, OrchestratedAnalysis, FileAnalysis, LineAnnotation, AgentType } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn, formatDistanceToNow } from "@/lib/utils";
@@ -32,6 +32,9 @@ export function Review() {
   const [, setShowReviewDialog] = useState(false);
   const [reviewBody, setReviewBody] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("all");
+  const [analysis, setAnalysis] = useState<OrchestratedAnalysis | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
 
   const prUrl = `https://github.com/${owner}/${repo}/pull/${prNumber}`;
   const prNumberInt = prNumber ? parseInt(prNumber, 10) : 0;
@@ -112,6 +115,33 @@ export function Review() {
 
   const hasReviewedBefore = !!reviewState?.last_reviewed_commit;
   const hasNewChanges = hasReviewedBefore && pr?.head.sha !== reviewState?.last_reviewed_commit;
+
+  const runAnalysis = useCallback(async () => {
+    if (!prUrl) return;
+    setIsAnalyzing(true);
+    setAnalysisError(null);
+    try {
+      console.log("Starting analysis for:", prUrl);
+      const result = await ai.analyzePROrchestrated(prUrl);
+      console.log("Analysis result:", result);
+      setAnalysis(result);
+    } catch (e) {
+      console.error("Analysis failed:", e);
+      // Tauri errors come as strings or objects with message property
+      const errorMsg = typeof e === "string"
+        ? e
+        : (e as { message?: string })?.message || JSON.stringify(e);
+      setAnalysisError(errorMsg);
+    } finally {
+      setIsAnalyzing(false);
+    }
+  }, [prUrl]);
+
+  // Get file analysis for selected file
+  const selectedFileAnalysis = useMemo(() => {
+    if (!analysis || !selectedFile) return null;
+    return analysis.file_analyses.find(fa => fa.filename === selectedFile.filename) || null;
+  }, [analysis, selectedFile]);
 
   const submitReview = useCallback(async (action: ReviewAction) => {
     // TODO: Implement GitHub API call to submit review
@@ -222,7 +252,12 @@ export function Review() {
             </TabsContent>
 
             <TabsContent value="ai-analytics" className="overflow-y-auto p-6 pb-12">
-              <AIAnalyticsPanel />
+              <AIAnalyticsPanel
+                analysis={analysis}
+                isAnalyzing={isAnalyzing}
+                error={analysisError}
+                onRunAnalysis={runAnalysis}
+              />
             </TabsContent>
           </Tabs>
         </TabsContent>
@@ -317,6 +352,9 @@ export function Review() {
                   onSelectFile={setSelectedFile}
                   viewedFiles={viewedFiles}
                   onToggleViewed={toggleFileViewed}
+                  analysis={analysis}
+                  isAnalyzing={isAnalyzing}
+                  onRunAnalysis={runAnalysis}
                 />
               </div>
             </div>
@@ -356,7 +394,7 @@ export function Review() {
 
               {/* AI Context Section */}
               {selectedFile && (
-                <AIContextPanel file={selectedFile} />
+                <AIContextPanel file={selectedFile} fileAnalysis={selectedFileAnalysis} />
               )}
 
               <div className="flex-1 overflow-auto">
@@ -366,6 +404,7 @@ export function Review() {
                   onEditComment={editComment}
                   onDeleteComment={deleteComment}
                   pendingComments={pendingComments}
+                  aiAnnotations={selectedFileAnalysis?.annotations || []}
                 />
               </div>
             </div>
@@ -555,34 +594,407 @@ function OverviewPanel({ pr, files }: OverviewPanelProps) {
   );
 }
 
-function AIAnalyticsPanel() {
-  const handleRefresh = () => {
-    // TODO: Implement AI analysis refresh
-    console.log("Refreshing AI analysis...");
-  };
+const AGENT_STATUS_MESSAGES: Record<AgentType, string[]> = {
+  security: [
+    "Scanning for vulnerabilities...",
+    "Checking authentication patterns...",
+    "Analyzing input validation...",
+    "Reviewing access controls...",
+  ],
+  architecture: [
+    "Evaluating code structure...",
+    "Checking design patterns...",
+    "Analyzing module boundaries...",
+    "Reviewing dependencies...",
+  ],
+  style: [
+    "Checking naming conventions...",
+    "Reviewing code consistency...",
+    "Analyzing documentation...",
+    "Looking for code smells...",
+  ],
+  performance: [
+    "Analyzing algorithm complexity...",
+    "Checking for N+1 queries...",
+    "Reviewing async patterns...",
+    "Looking for memory issues...",
+  ],
+};
+
+function AnalysisLoadingState() {
+  const [messageIndices, setMessageIndices] = useState<Record<AgentType, number>>({
+    security: 0,
+    architecture: 0,
+    style: 0,
+    performance: 0,
+  });
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setMessageIndices((prev) => {
+        const agents: AgentType[] = ["security", "architecture", "style", "performance"];
+        const randomAgent = agents[Math.floor(Math.random() * agents.length)];
+        return {
+          ...prev,
+          [randomAgent]: (prev[randomAgent] + 1) % AGENT_STATUS_MESSAGES[randomAgent].length,
+        };
+      });
+    }, 2000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  const agents: { type: AgentType; label: string; icon: React.ReactNode; color: string }[] = [
+    { type: "security", label: "Security", icon: <Shield className="h-4 w-4" />, color: "text-red-500" },
+    { type: "architecture", label: "Architecture", icon: <Layers className="h-4 w-4" />, color: "text-blue-500" },
+    { type: "style", label: "Style", icon: <Paintbrush className="h-4 w-4" />, color: "text-purple-500" },
+    { type: "performance", label: "Performance", icon: <Zap className="h-4 w-4" />, color: "text-amber-500" },
+  ];
 
   return (
     <div className="h-full flex flex-col items-center justify-center text-center max-w-md mx-auto">
       <div className="p-4 bg-purple-100 dark:bg-purple-950/50 rounded-full mb-6">
-        <Sparkles className="h-12 w-12 text-purple-500" />
+        <Sparkles className="h-10 w-10 text-purple-500 animate-pulse" />
       </div>
 
-      <h2 className="text-xl font-semibold mb-2">AI-Powered Analysis</h2>
+      <h2 className="text-xl font-semibold mb-2">Analyzing Pull Request</h2>
       <p className="text-muted-foreground mb-6">
-        Get intelligent insights about this pull request including risk assessment,
-        code quality analysis, and suggested review focus areas.
+        Running 4 specialized agents in parallel
       </p>
 
-      <div className="p-4 bg-amber-50 dark:bg-amber-950/30 rounded-lg border border-amber-200 dark:border-amber-800 mb-6">
-        <p className="text-sm text-amber-700 dark:text-amber-300">
-          This feature is coming soon. Configure your AI provider in Settings to enable analysis.
-        </p>
+      <div className="w-full space-y-3 mb-6">
+        {agents.map(({ type, label, icon, color }) => (
+          <div
+            key={type}
+            className="flex items-center gap-3 p-3 bg-muted/50 rounded-lg"
+          >
+            <div className={cn("p-2 rounded-lg bg-background", color)}>
+              {icon}
+            </div>
+            <div className="flex-1 text-left">
+              <div className="flex items-center gap-2">
+                <span className="font-medium text-sm">{label}</span>
+                <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+              </div>
+              <p className="text-xs text-muted-foreground transition-all duration-300">
+                {AGENT_STATUS_MESSAGES[type][messageIndices[type]]}
+              </p>
+            </div>
+          </div>
+        ))}
       </div>
 
-      <Button onClick={handleRefresh} variant="outline" className="gap-2">
-        <RefreshCw className="h-4 w-4" />
-        Run Analysis
-      </Button>
+      <p className="text-xs text-muted-foreground">This typically takes 30-60 seconds</p>
+    </div>
+  );
+}
+
+interface AIAnalyticsPanelProps {
+  analysis: OrchestratedAnalysis | null;
+  isAnalyzing: boolean;
+  error: string | null;
+  onRunAnalysis: () => void;
+}
+
+function AIAnalyticsPanel({ analysis, isAnalyzing, error, onRunAnalysis }: AIAnalyticsPanelProps) {
+  const [expandedAgents, setExpandedAgents] = useState<Set<AgentType>>(new Set());
+
+  const toggleAgent = (agentType: AgentType) => {
+    setExpandedAgents(prev => {
+      const next = new Set(prev);
+      if (next.has(agentType)) {
+        next.delete(agentType);
+      } else {
+        next.add(agentType);
+      }
+      return next;
+    });
+  };
+
+  const getAgentIcon = (type: AgentType) => {
+    switch (type) {
+      case "security":
+        return <Shield className="h-5 w-5" />;
+      case "architecture":
+        return <Layers className="h-5 w-5" />;
+      case "style":
+        return <Paintbrush className="h-5 w-5" />;
+      case "performance":
+        return <Zap className="h-5 w-5" />;
+    }
+  };
+
+  const getAgentColors = (type: AgentType) => {
+    switch (type) {
+      case "security":
+        return { icon: "text-red-500", bg: "bg-red-50 dark:bg-red-950/30", border: "border-red-200 dark:border-red-800" };
+      case "architecture":
+        return { icon: "text-blue-500", bg: "bg-blue-50 dark:bg-blue-950/30", border: "border-blue-200 dark:border-blue-800" };
+      case "style":
+        return { icon: "text-purple-500", bg: "bg-purple-50 dark:bg-purple-950/30", border: "border-purple-200 dark:border-purple-800" };
+      case "performance":
+        return { icon: "text-amber-500", bg: "bg-amber-50 dark:bg-amber-950/30", border: "border-amber-200 dark:border-amber-800" };
+    }
+  };
+
+  const getRiskColor = (level: string) => {
+    switch (level.toLowerCase()) {
+      case "high":
+        return "text-red-600 bg-red-100 dark:bg-red-950/50";
+      case "medium":
+        return "text-amber-600 bg-amber-100 dark:bg-amber-950/50";
+      default:
+        return "text-green-600 bg-green-100 dark:bg-green-950/50";
+    }
+  };
+
+  const getSeverityColor = (severity: string) => {
+    switch (severity.toLowerCase()) {
+      case "critical":
+        return "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200";
+      case "high":
+        return "bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-200";
+      case "medium":
+        return "bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200";
+      case "low":
+        return "bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200";
+      default:
+        return "bg-gray-100 text-gray-800 dark:bg-gray-900 dark:text-gray-200";
+    }
+  };
+
+  // Sort agent responses by priority (highest severity findings first)
+  const sortedAgentResponses = useMemo(() => {
+    if (!analysis) return [];
+    return [...analysis.agent_responses].sort((a, b) => {
+      // Calculate priority score based on findings severity
+      const getScore = (response: typeof a) => {
+        let score = 0;
+        for (const f of response.findings) {
+          if (f.severity === "critical") score += 100;
+          else if (f.severity === "high") score += 50;
+          else if (f.severity === "medium") score += 10;
+          else if (f.severity === "low") score += 1;
+        }
+        // Also factor in risk assessment
+        if (response.summary.risk_assessment === "high") score += 30;
+        else if (response.summary.risk_assessment === "medium") score += 15;
+        return score;
+      };
+      return getScore(b) - getScore(a);
+    });
+  }, [analysis]);
+
+  // Show empty state if no analysis
+  if (!analysis && !isAnalyzing) {
+    return (
+      <div className="h-full flex flex-col items-center justify-center text-center max-w-md mx-auto">
+        <div className="p-4 bg-purple-100 dark:bg-purple-950/50 rounded-full mb-6">
+          <Sparkles className="h-12 w-12 text-purple-500" />
+        </div>
+
+        <h2 className="text-xl font-semibold mb-2">AI-Powered Analysis</h2>
+        <p className="text-muted-foreground mb-6">
+          Get intelligent insights about this pull request including risk assessment,
+          code quality analysis, and suggested review focus areas.
+        </p>
+
+        {error && (
+          <div className="p-4 bg-red-50 dark:bg-red-950/30 rounded-lg border border-red-200 dark:border-red-800 mb-6">
+            <p className="text-sm text-red-700 dark:text-red-300">{error}</p>
+          </div>
+        )}
+
+        <Button onClick={onRunAnalysis} className="gap-2">
+          <Sparkles className="h-4 w-4" />
+          Run Analysis
+        </Button>
+      </div>
+    );
+  }
+
+  // Show loading state
+  if (isAnalyzing) {
+    return <AnalysisLoadingState />;
+  }
+
+  // Show analysis results
+  if (!analysis) return null;
+
+  const totalFindings = analysis.agent_responses.reduce((sum, r) => sum + r.findings.length, 0);
+  const totalTokens = analysis.total_token_usage?.total_tokens || 0;
+
+  return (
+    <div className="space-y-6 max-w-3xl">
+      {/* Header with risk level */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="p-2 bg-purple-100 dark:bg-purple-950/50 rounded-lg">
+            <Sparkles className="h-5 w-5 text-purple-500" />
+          </div>
+          <div>
+            <h2 className="text-lg font-semibold">AI Analysis Complete</h2>
+            <p className="text-sm text-muted-foreground">
+              {totalFindings} finding{totalFindings !== 1 ? "s" : ""} · {(analysis.total_processing_time_ms / 1000).toFixed(1)}s · ~{(totalTokens / 1000).toFixed(1)}k tokens
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className={cn("px-3 py-1 rounded-full text-sm font-medium", getRiskColor(analysis.risk_level))}>
+            {analysis.risk_level.charAt(0).toUpperCase() + analysis.risk_level.slice(1)} Risk
+          </span>
+          <Button variant="outline" size="sm" onClick={onRunAnalysis} className="gap-1.5">
+            <RefreshCw className="h-3.5 w-3.5" />
+            Re-analyze
+          </Button>
+        </div>
+      </div>
+
+      {/* Failed agents warning */}
+      {analysis.failed_agents.length > 0 && (
+        <div className="p-3 bg-amber-50 dark:bg-amber-950/30 rounded-lg border border-amber-200 dark:border-amber-800">
+          <div className="flex items-center gap-2 text-amber-700 dark:text-amber-300">
+            <AlertTriangle className="h-4 w-4" />
+            <span className="text-sm font-medium">
+              {analysis.failed_agents.length} agent(s) failed
+            </span>
+          </div>
+          <ul className="mt-2 text-sm text-amber-600 dark:text-amber-400">
+            {analysis.failed_agents.map((fa) => (
+              <li key={fa.agent_type}>• {fa.agent_type}: {fa.error}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Agent Results - Stacked and sorted by severity */}
+      <div className="space-y-3">
+        {sortedAgentResponses.map((response) => {
+          const colors = getAgentColors(response.agent_type);
+          const isExpanded = expandedAgents.has(response.agent_type);
+          const hasFindings = response.findings.length > 0;
+
+          // Count findings by severity
+          const severityCounts = response.findings.reduce((acc, f) => {
+            acc[f.severity] = (acc[f.severity] || 0) + 1;
+            return acc;
+          }, {} as Record<string, number>);
+
+          return (
+            <div
+              key={response.agent_type}
+              className={cn("rounded-lg border", colors.border, colors.bg)}
+            >
+              {/* Agent Header - Always visible */}
+              <button
+                onClick={() => hasFindings && toggleAgent(response.agent_type)}
+                className={cn(
+                  "w-full p-4 flex items-start gap-3 text-left",
+                  hasFindings && "cursor-pointer hover:bg-black/5 dark:hover:bg-white/5"
+                )}
+                disabled={!hasFindings}
+              >
+                <div className={cn("p-2 rounded-lg bg-white dark:bg-black/20", colors.icon)}>
+                  {getAgentIcon(response.agent_type)}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="font-semibold capitalize">{response.agent_type}</span>
+                    <span className={cn(
+                      "text-xs px-2 py-0.5 rounded-full",
+                      getRiskColor(response.summary.risk_assessment)
+                    )}>
+                      {response.summary.risk_assessment}
+                    </span>
+                    {hasFindings && (
+                      <span className="text-xs text-muted-foreground">
+                        {response.findings.length} finding{response.findings.length !== 1 ? "s" : ""}
+                      </span>
+                    )}
+                    {response.token_usage && (
+                      <span className="text-xs text-muted-foreground ml-auto">
+                        ~{(response.token_usage.total_tokens / 1000).toFixed(1)}k tokens
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    {response.summary.overview}
+                  </p>
+                  {/* Severity badges */}
+                  {hasFindings && Object.keys(severityCounts).length > 0 && (
+                    <div className="flex gap-1.5 mt-2">
+                      {["critical", "high", "medium", "low", "info"].map(sev =>
+                        severityCounts[sev] ? (
+                          <span key={sev} className={cn("text-xs px-1.5 py-0.5 rounded", getSeverityColor(sev))}>
+                            {severityCounts[sev]} {sev}
+                          </span>
+                        ) : null
+                      )}
+                    </div>
+                  )}
+                </div>
+                {hasFindings && (
+                  <ChevronDown className={cn(
+                    "h-5 w-5 text-muted-foreground transition-transform flex-shrink-0",
+                    isExpanded && "rotate-180"
+                  )} />
+                )}
+              </button>
+
+              {/* Expanded Findings */}
+              {isExpanded && hasFindings && (
+                <div className="border-t border-inherit">
+                  <div className="p-4 space-y-3">
+                    {response.findings.map((finding, idx) => (
+                      <div key={idx} className="flex items-start gap-3 p-3 bg-white dark:bg-black/20 rounded-lg">
+                        <span className={cn(
+                          "text-xs px-1.5 py-0.5 rounded flex-shrink-0 mt-0.5",
+                          getSeverityColor(finding.severity)
+                        )}>
+                          {finding.severity}
+                        </span>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 text-xs text-muted-foreground mb-1">
+                            <span className="font-mono truncate">{finding.file}</span>
+                            {finding.line && <span>Line {finding.line}</span>}
+                            <span className="px-1.5 py-0.5 bg-muted rounded">{finding.category}</span>
+                          </div>
+                          <p className="text-sm">{finding.message}</p>
+                          {finding.suggestion && (
+                            <p className="text-sm text-muted-foreground mt-1 italic">
+                              Suggestion: {finding.suggestion}
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Suggested Review Order */}
+      {analysis.suggested_review_order.length > 0 && (
+        <div className="p-4 bg-muted/50 rounded-lg">
+          <h3 className="font-medium mb-3 flex items-center gap-2">
+            <Files className="h-4 w-4 text-muted-foreground" />
+            Suggested Review Order
+          </h3>
+          <ol className="space-y-1 text-sm">
+            {analysis.suggested_review_order.slice(0, 5).map((file, i) => (
+              <li key={file} className="flex items-center gap-2 text-muted-foreground">
+                <span className="w-5 h-5 bg-background rounded-full flex items-center justify-center text-xs font-medium">
+                  {i + 1}
+                </span>
+                <span className="truncate font-mono text-xs">{file}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
     </div>
   );
 }
@@ -593,6 +1005,9 @@ interface PrioritizedFileListProps {
   onSelectFile: (file: GitHubFile) => void;
   viewedFiles: Set<string>;
   onToggleViewed: (filename: string) => void;
+  analysis: OrchestratedAnalysis | null;
+  isAnalyzing: boolean;
+  onRunAnalysis: () => void;
 }
 
 function PrioritizedFileList({
@@ -601,6 +1016,9 @@ function PrioritizedFileList({
   onSelectFile,
   viewedFiles,
   onToggleViewed,
+  analysis,
+  isAnalyzing,
+  onRunAnalysis,
 }: PrioritizedFileListProps) {
   const [expandedSections, setExpandedSections] = useState<Set<string>>(
     new Set(["key-changes", "context", "other"])
@@ -618,11 +1036,39 @@ function PrioritizedFileList({
     });
   };
 
-  // TODO: This will be populated by AI analysis
-  // For now, we'll simulate some prioritization based on file characteristics
+  // Use AI analysis for prioritization when available
   const { keyChanges, contextFiles, otherFiles } = useMemo(() => {
-    // Placeholder logic - AI will provide real prioritization
-    // For now: files with most changes are "key", test files are "context", rest are "other"
+    // If we have AI analysis, use its priorities
+    if (analysis?.file_priorities) {
+      const highPriorityFiles = new Set(
+        analysis.file_priorities
+          .filter(fp => fp.priority_score >= 6)
+          .map(fp => fp.filename)
+      );
+      const mediumPriorityFiles = new Set(
+        analysis.file_priorities
+          .filter(fp => fp.priority_score >= 3 && fp.priority_score < 6)
+          .map(fp => fp.filename)
+      );
+
+      const keyChanges: GitHubFile[] = [];
+      const contextFiles: GitHubFile[] = [];
+      const otherFiles: GitHubFile[] = [];
+
+      for (const file of files) {
+        if (highPriorityFiles.has(file.filename)) {
+          keyChanges.push(file);
+        } else if (mediumPriorityFiles.has(file.filename)) {
+          contextFiles.push(file);
+        } else {
+          otherFiles.push(file);
+        }
+      }
+
+      return { keyChanges, contextFiles, otherFiles };
+    }
+
+    // Fallback: Placeholder logic based on file characteristics
     const sorted = [...files].sort(
       (a, b) => (b.additions + b.deletions) - (a.additions + a.deletions)
     );
@@ -643,7 +1089,7 @@ function PrioritizedFileList({
     }
 
     return { keyChanges, contextFiles, otherFiles };
-  }, [files]);
+  }, [files, analysis]);
 
   if (files.length === 0) {
     return (
@@ -767,10 +1213,33 @@ function PrioritizedFileList({
     <div>
       {/* AI Analysis banner */}
       <div className="p-3 bg-purple-50 dark:bg-purple-950/30 border-b">
-        <div className="flex items-center gap-2 text-sm text-purple-700 dark:text-purple-300">
-          <Sparkles className="h-4 w-4" />
-          <span>AI prioritization coming soon</span>
-        </div>
+        {isAnalyzing ? (
+          <div className="flex items-center gap-2 text-sm text-purple-700 dark:text-purple-300">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            <span>Running AI analysis...</span>
+          </div>
+        ) : analysis ? (
+          <div className="flex items-center justify-between text-sm">
+            <div className="flex items-center gap-2 text-purple-700 dark:text-purple-300">
+              <Sparkles className="h-4 w-4" />
+              <span>AI prioritization active</span>
+            </div>
+            <button
+              onClick={onRunAnalysis}
+              className="text-xs text-purple-500 hover:underline"
+            >
+              Re-analyze
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={onRunAnalysis}
+            className="flex items-center gap-2 text-sm text-purple-700 dark:text-purple-300 hover:text-purple-800 dark:hover:text-purple-200"
+          >
+            <Sparkles className="h-4 w-4" />
+            <span>Run AI prioritization</span>
+          </button>
+        )}
       </div>
 
       {renderSection(
@@ -819,12 +1288,38 @@ function FileStatusIcon({ status }: { status: string }) {
 
 interface AIContextPanelProps {
   file: GitHubFile;
+  fileAnalysis: FileAnalysis | null;
 }
 
-function AIContextPanel({ file }: AIContextPanelProps) {
-  // TODO: This will be populated by actual AI analysis
-  // For now, generate placeholder context based on file characteristics
+function AIContextPanel({ file, fileAnalysis }: AIContextPanelProps) {
+  // Use AI analysis if available, otherwise generate placeholder context
   const context = useMemo(() => {
+    // If we have AI analysis, use it
+    if (fileAnalysis && fileAnalysis.agent_findings.length > 0) {
+      const topFinding = fileAnalysis.agent_findings[0];
+      const findingCount = fileAnalysis.agent_findings.length;
+      const severityCounts = fileAnalysis.agent_findings.reduce((acc, f) => {
+        acc[f.severity] = (acc[f.severity] || 0) + 1;
+        return acc;
+      }, {} as Record<string, number>);
+
+      let importance = "";
+      if (severityCounts.critical || severityCounts.high) {
+        importance = "Needs careful review";
+      } else if (severityCounts.medium) {
+        importance = "Review recommended";
+      } else {
+        importance = "Minor notes";
+      }
+
+      return {
+        importance,
+        description: `${findingCount} finding(s): ${topFinding.message}${findingCount > 1 ? ` (+${findingCount - 1} more)` : ""}`,
+        isFromAI: true,
+      };
+    }
+
+    // Fallback: Generate placeholder context based on file characteristics
     const filename = file.filename.toLowerCase();
     const isTest = filename.includes("test") || filename.includes("spec");
     const isConfig = filename.includes("config") || filename.includes(".json") || filename.includes(".yaml") || filename.includes(".toml");
@@ -855,8 +1350,8 @@ function AIContextPanel({ file }: AIContextPanelProps) {
       description = "Standard code change. Review for correctness and adherence to project conventions.";
     }
 
-    return { importance, description };
-  }, [file]);
+    return { importance, description, isFromAI: false };
+  }, [file, fileAnalysis]);
 
   return (
     <div className="px-4 py-2.5 bg-gradient-to-r from-purple-50 to-blue-50 dark:from-purple-950/30 dark:to-blue-950/30 border-b flex-shrink-0">
@@ -867,7 +1362,9 @@ function AIContextPanel({ file }: AIContextPanelProps) {
             <span className="text-sm font-medium text-purple-700 dark:text-purple-300">
               {context.importance}
             </span>
-            <span className="text-xs text-muted-foreground">• AI Analysis</span>
+            <span className="text-xs text-muted-foreground">
+              • {context.isFromAI ? "AI Analysis" : "Auto-detected"}
+            </span>
           </div>
           <p className="text-sm text-muted-foreground mt-0.5 line-clamp-2">
             {context.description}
@@ -897,6 +1394,10 @@ interface AIAnnotation {
   lineIndex: number;
   type: "warning" | "info" | "suggestion";
   message: string;
+  severity?: string;
+  category?: string;
+  sources?: AgentType[];
+  suggestion?: string | null;
 }
 
 interface LineSelection {
@@ -1068,9 +1569,10 @@ interface DiffPanelProps {
   onEditComment?: (index: number, newBody: string) => void;
   onDeleteComment?: (index: number) => void;
   pendingComments?: PendingComment[];
+  aiAnnotations?: LineAnnotation[];
 }
 
-function DiffPanel({ file, onAddComment, onEditComment, onDeleteComment, pendingComments = [] }: DiffPanelProps) {
+function DiffPanel({ file, onAddComment, onEditComment, onDeleteComment, pendingComments = [], aiAnnotations = [] }: DiffPanelProps) {
   const [commentingLines, setCommentingLines] = useState<LineSelection | null>(null);
   const [commentText, setCommentText] = useState("");
   const [selectionStart, setSelectionStart] = useState<number | null>(null);
@@ -1085,20 +1587,33 @@ function DiffPanel({ file, onAddComment, onEditComment, onDeleteComment, pending
     return parseDiff(file.patch);
   }, [file?.patch]);
 
-  const aiAnnotations = useMemo(() => {
+  // Use AI annotations from analysis if available, otherwise fall back to generated ones
+  const effectiveAnnotations: AIAnnotation[] = useMemo(() => {
+    if (aiAnnotations.length > 0) {
+      // Convert LineAnnotation to AIAnnotation format for display
+      return aiAnnotations.map(a => ({
+        lineIndex: a.row_index ?? a.line_number,
+        type: a.annotation_type as "warning" | "info" | "suggestion",
+        message: a.message,
+        severity: a.severity,
+        category: a.category,
+        sources: a.sources,
+        suggestion: a.suggestion,
+      }));
+    }
     if (!file) return [];
     return generateAIAnnotations(file, diffRows);
-  }, [file, diffRows]);
+  }, [file, diffRows, aiAnnotations]);
 
   const annotationsByLine = useMemo(() => {
     const map = new Map<number, AIAnnotation[]>();
-    aiAnnotations.forEach((a) => {
+    effectiveAnnotations.forEach((a) => {
       const existing = map.get(a.lineIndex) || [];
       existing.push(a);
       map.set(a.lineIndex, existing);
     });
     return map;
-  }, [aiAnnotations]);
+  }, [effectiveAnnotations]);
 
   // Get comments for this file with their original indices
   const fileComments = useMemo(() => {
@@ -1228,17 +1743,33 @@ function DiffPanel({ file, onAddComment, onEditComment, onDeleteComment, pending
 
             {/* Tooltip */}
             {isHovered && (
-              <div className="absolute left-6 top-0 z-50 w-64 p-2 bg-popover border rounded-md shadow-lg text-xs font-sans">
+              <div className="absolute left-6 top-0 z-50 w-72 p-2 bg-popover border rounded-md shadow-lg text-xs font-sans">
                 {annotations.map((a, i) => (
-                  <div key={i} className={cn("flex gap-2", i > 0 && "mt-2 pt-2 border-t")}>
-                    {a.type === "warning" ? (
-                      <AlertTriangle className="h-3.5 w-3.5 text-amber-500 flex-shrink-0 mt-0.5" />
-                    ) : a.type === "suggestion" ? (
-                      <Sparkles className="h-3.5 w-3.5 text-purple-500 flex-shrink-0 mt-0.5" />
-                    ) : (
-                      <MessageSquare className="h-3.5 w-3.5 text-blue-500 flex-shrink-0 mt-0.5" />
+                  <div key={i} className={cn("flex flex-col gap-1", i > 0 && "mt-2 pt-2 border-t")}>
+                    <div className="flex items-start gap-2">
+                      {a.type === "warning" ? (
+                        <AlertTriangle className="h-3.5 w-3.5 text-amber-500 flex-shrink-0 mt-0.5" />
+                      ) : a.type === "suggestion" ? (
+                        <Sparkles className="h-3.5 w-3.5 text-purple-500 flex-shrink-0 mt-0.5" />
+                      ) : (
+                        <MessageSquare className="h-3.5 w-3.5 text-blue-500 flex-shrink-0 mt-0.5" />
+                      )}
+                      <span className="text-foreground">{a.message}</span>
+                    </div>
+                    {a.sources && a.sources.length > 0 && (
+                      <div className="flex gap-1 pl-5 mt-1">
+                        {a.sources.map((source) => (
+                          <span key={source} className="text-[10px] px-1.5 py-0.5 bg-muted rounded capitalize">
+                            {source}
+                          </span>
+                        ))}
+                      </div>
                     )}
-                    <span className="text-foreground">{a.message}</span>
+                    {a.suggestion && (
+                      <div className="pl-5 mt-1 text-muted-foreground italic">
+                        Suggestion: {a.suggestion}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>

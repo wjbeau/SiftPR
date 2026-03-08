@@ -1,0 +1,583 @@
+use std::collections::HashMap;
+use std::time::Instant;
+
+use tokio::time::{timeout, Duration};
+
+use crate::error::{AppError, AppResult};
+use crate::github::GitHubFile;
+
+use super::client::AIClient;
+use super::prompts::{build_agent_prompt, build_files_context, get_system_prompt};
+use super::types::{
+    AgentFinding, AgentResponse, AgentSummary, AgentType, AnnotationType, FailedAgent,
+    FileAnalysis, FileContext, FilePriority, KeyChange, LineAnnotation, OrchestratedAnalysis,
+    PRCategory, RawAgentResponse, Severity, TokenUsage,
+};
+
+const AGENT_TIMEOUT_SECS: u64 = 60;
+
+pub struct Orchestrator {
+    client: AIClient,
+}
+
+impl Orchestrator {
+    pub fn new() -> Self {
+        Self {
+            client: AIClient::new(),
+        }
+    }
+
+    /// Run all agents in parallel and aggregate results
+    pub async fn analyze_pr(
+        &self,
+        provider: &str,
+        api_key: &str,
+        model: &str,
+        pr_title: &str,
+        pr_body: Option<&str>,
+        files: &[GitHubFile],
+        codebase_context: Option<&str>,
+    ) -> AppResult<OrchestratedAnalysis> {
+        let start_time = Instant::now();
+        let files_context = build_files_context(files);
+
+        // Run all agents in parallel
+        let (security_result, architecture_result, style_result, performance_result) = tokio::join!(
+            self.run_agent(
+                AgentType::Security,
+                provider,
+                api_key,
+                model,
+                pr_title,
+                pr_body,
+                &files_context,
+                codebase_context,
+            ),
+            self.run_agent(
+                AgentType::Architecture,
+                provider,
+                api_key,
+                model,
+                pr_title,
+                pr_body,
+                &files_context,
+                codebase_context,
+            ),
+            self.run_agent(
+                AgentType::Style,
+                provider,
+                api_key,
+                model,
+                pr_title,
+                pr_body,
+                &files_context,
+                codebase_context,
+            ),
+            self.run_agent(
+                AgentType::Performance,
+                provider,
+                api_key,
+                model,
+                pr_title,
+                pr_body,
+                &files_context,
+                codebase_context,
+            ),
+        );
+
+        // Collect successful responses and failures
+        let mut agent_responses: Vec<AgentResponse> = Vec::new();
+        let mut failed_agents: Vec<FailedAgent> = Vec::new();
+
+        for (agent_type, result) in [
+            (AgentType::Security, security_result),
+            (AgentType::Architecture, architecture_result),
+            (AgentType::Style, style_result),
+            (AgentType::Performance, performance_result),
+        ] {
+            match result {
+                Ok(response) => {
+                    println!("[AI] {} agent succeeded with {} findings", agent_type.as_str(), response.findings.len());
+                    agent_responses.push(response);
+                }
+                Err(e) => {
+                    println!("[AI] {} agent failed: {}", agent_type.as_str(), e);
+                    failed_agents.push(FailedAgent {
+                        agent_type,
+                        error: e.to_string(),
+                    });
+                }
+            }
+        }
+
+        // Require at least one successful agent
+        if agent_responses.is_empty() {
+            return Err(AppError::AIProvider(
+                "All agents failed. Please try again.".to_string(),
+            ));
+        }
+
+        // Aggregate results
+        let analysis = self.aggregate_responses(
+            &agent_responses,
+            &failed_agents,
+            files,
+            start_time.elapsed().as_millis() as u64,
+        );
+
+        Ok(analysis)
+    }
+
+    async fn run_agent(
+        &self,
+        agent_type: AgentType,
+        provider: &str,
+        api_key: &str,
+        model: &str,
+        pr_title: &str,
+        pr_body: Option<&str>,
+        files_context: &str,
+        codebase_context: Option<&str>,
+    ) -> AppResult<AgentResponse> {
+        let start_time = Instant::now();
+
+        let system_prompt = get_system_prompt(agent_type);
+        let user_prompt = build_agent_prompt(
+            agent_type,
+            pr_title,
+            pr_body,
+            files_context,
+            codebase_context,
+        );
+
+        // Apply timeout
+        let result = timeout(
+            Duration::from_secs(AGENT_TIMEOUT_SECS),
+            self.client.call_with_system(provider, api_key, model, system_prompt, &user_prompt),
+        )
+        .await
+        .map_err(|_| AppError::AIProvider(format!("{} agent timed out", agent_type.as_str())))?;
+
+        let response_text = result?;
+        let processing_time_ms = start_time.elapsed().as_millis() as u64;
+
+        // Estimate token usage (rough approximation: ~4 chars per token)
+        let prompt_chars = system_prompt.len() + user_prompt.len();
+        let response_chars = response_text.len();
+        let estimated_prompt_tokens = (prompt_chars / 4) as u32;
+        let estimated_completion_tokens = (response_chars / 4) as u32;
+
+        println!("[AI] {} agent completed in {}ms (~{} prompt + ~{} completion tokens)",
+            agent_type.as_str(),
+            processing_time_ms,
+            estimated_prompt_tokens,
+            estimated_completion_tokens
+        );
+
+        println!("[AI] {} agent raw response (first 500 chars): {}",
+            agent_type.as_str(),
+            &response_text.chars().take(500).collect::<String>()
+        );
+
+        // Parse the response
+        let raw_response = parse_agent_response(&response_text)
+            .map_err(|e| {
+                println!("[AI] {} agent parse error: {}", agent_type.as_str(), e);
+                e
+            })?;
+
+        Ok(AgentResponse {
+            agent_type,
+            summary: AgentSummary {
+                overview: raw_response.summary.overview,
+                risk_assessment: raw_response.summary.risk_assessment,
+                top_concerns: raw_response.summary.top_concerns,
+            },
+            findings: raw_response
+                .findings
+                .into_iter()
+                .map(|f| f.into_finding())
+                .collect(),
+            priority_files: raw_response.priority_files,
+            processing_time_ms,
+            token_usage: Some(TokenUsage {
+                prompt_tokens: estimated_prompt_tokens,
+                completion_tokens: estimated_completion_tokens,
+                total_tokens: estimated_prompt_tokens + estimated_completion_tokens,
+            }),
+        })
+    }
+
+    fn aggregate_responses(
+        &self,
+        responses: &[AgentResponse],
+        failed_agents: &[FailedAgent],
+        files: &[GitHubFile],
+        total_time_ms: u64,
+    ) -> OrchestratedAnalysis {
+        // Calculate overall risk level
+        let risk_level = self.calculate_risk_level(responses);
+
+        // Build summary from agent summaries
+        let summary = self.build_summary(responses);
+
+        // Calculate file priorities
+        let file_priorities = self.calculate_file_priorities(responses, files);
+
+        // Build per-file analyses with annotations
+        let file_analyses = self.build_file_analyses(responses, files);
+
+        // Build categories from findings
+        let categories = self.build_categories(responses, files);
+
+        // Build key changes
+        let key_changes = self.build_key_changes(responses);
+
+        // Suggested review order based on priorities
+        let suggested_review_order: Vec<String> = file_priorities
+            .iter()
+            .take(10)
+            .map(|fp| fp.filename.clone())
+            .collect();
+
+        // Calculate total token usage across all agents
+        let total_token_usage = responses.iter().fold(
+            TokenUsage::default(),
+            |acc, r| {
+                if let Some(usage) = &r.token_usage {
+                    TokenUsage {
+                        prompt_tokens: acc.prompt_tokens + usage.prompt_tokens,
+                        completion_tokens: acc.completion_tokens + usage.completion_tokens,
+                        total_tokens: acc.total_tokens + usage.total_tokens,
+                    }
+                } else {
+                    acc
+                }
+            },
+        );
+
+        OrchestratedAnalysis {
+            summary,
+            risk_level,
+            file_priorities,
+            file_analyses,
+            categories,
+            key_changes,
+            suggested_review_order,
+            agent_responses: responses.to_vec(),
+            failed_agents: failed_agents.to_vec(),
+            total_processing_time_ms: total_time_ms,
+            total_token_usage,
+        }
+    }
+
+    fn calculate_risk_level(&self, responses: &[AgentResponse]) -> String {
+        let mut high_count = 0;
+        let mut medium_count = 0;
+
+        for response in responses {
+            match response.summary.risk_assessment.to_lowercase().as_str() {
+                "high" => high_count += 1,
+                "medium" => medium_count += 1,
+                _ => {}
+            }
+
+            // Also consider critical/high severity findings
+            for finding in &response.findings {
+                match finding.severity {
+                    Severity::Critical => high_count += 2,
+                    Severity::High => high_count += 1,
+                    _ => {}
+                }
+            }
+        }
+
+        if high_count >= 2 {
+            "high".to_string()
+        } else if high_count >= 1 || medium_count >= 2 {
+            "medium".to_string()
+        } else {
+            "low".to_string()
+        }
+    }
+
+    fn build_summary(&self, responses: &[AgentResponse]) -> String {
+        let mut summaries: Vec<String> = Vec::new();
+
+        for response in responses {
+            if !response.summary.overview.is_empty() {
+                summaries.push(format!(
+                    "**{}**: {}",
+                    capitalize(response.agent_type.as_str()),
+                    response.summary.overview
+                ));
+            }
+        }
+
+        if summaries.is_empty() {
+            "No significant issues found.".to_string()
+        } else {
+            summaries.join("\n\n")
+        }
+    }
+
+    fn calculate_file_priorities(
+        &self,
+        responses: &[AgentResponse],
+        files: &[GitHubFile],
+    ) -> Vec<FilePriority> {
+        let mut file_scores: HashMap<String, (u8, Vec<String>)> = HashMap::new();
+
+        // Initialize with all files
+        for file in files {
+            file_scores.insert(file.filename.clone(), (0, Vec::new()));
+        }
+
+        // Add scores from findings
+        for response in responses {
+            let agent_name = capitalize(response.agent_type.as_str());
+
+            for finding in &response.findings {
+                let entry = file_scores
+                    .entry(finding.file.clone())
+                    .or_insert((0, Vec::new()));
+
+                let severity_score = finding.severity.priority() * 2;
+                entry.0 = entry.0.saturating_add(severity_score);
+                entry.1.push(format!(
+                    "{}: {} ({})",
+                    agent_name,
+                    finding.category,
+                    format!("{:?}", finding.severity).to_lowercase()
+                ));
+            }
+
+            // Add scores for priority files
+            for priority_file in &response.priority_files {
+                let entry = file_scores
+                    .entry(priority_file.clone())
+                    .or_insert((0, Vec::new()));
+                entry.0 = entry.0.saturating_add(3);
+                entry.1.push(format!("{}: Priority file", agent_name));
+            }
+        }
+
+        // Convert to sorted list
+        let mut priorities: Vec<FilePriority> = file_scores
+            .into_iter()
+            .map(|(filename, (score, reasons))| FilePriority {
+                filename,
+                priority_score: score,
+                reasons,
+            })
+            .collect();
+
+        priorities.sort_by(|a, b| b.priority_score.cmp(&a.priority_score));
+        priorities
+    }
+
+    fn build_file_analyses(
+        &self,
+        responses: &[AgentResponse],
+        files: &[GitHubFile],
+    ) -> Vec<FileAnalysis> {
+        let mut file_map: HashMap<String, FileAnalysis> = HashMap::new();
+
+        // Initialize with all files
+        for file in files {
+            file_map.insert(
+                file.filename.clone(),
+                FileAnalysis {
+                    filename: file.filename.clone(),
+                    importance_score: 0,
+                    annotations: Vec::new(),
+                    context: FileContext {
+                        summary: String::new(),
+                        purpose: String::new(),
+                        related_files: Vec::new(),
+                    },
+                    agent_findings: Vec::new(),
+                },
+            );
+        }
+
+        // Add findings as annotations
+        for response in responses {
+            for finding in &response.findings {
+                if let Some(analysis) = file_map.get_mut(&finding.file) {
+                    // Add to agent findings
+                    analysis.agent_findings.push(finding.clone());
+
+                    // Add annotation if line number exists
+                    if let Some(line) = finding.line {
+                        analysis.annotations.push(LineAnnotation {
+                            line_number: line,
+                            row_index: None, // Will be mapped by frontend
+                            annotation_type: severity_to_annotation_type(&finding.severity),
+                            message: finding.message.clone(),
+                            sources: vec![response.agent_type],
+                            severity: finding.severity,
+                            category: finding.category.clone(),
+                            suggestion: finding.suggestion.clone(),
+                        });
+                    }
+
+                    // Update importance score
+                    analysis.importance_score = analysis
+                        .importance_score
+                        .saturating_add(finding.severity.priority());
+                }
+            }
+        }
+
+        // Merge duplicate annotations on same line
+        for analysis in file_map.values_mut() {
+            analysis.annotations = merge_annotations(&analysis.annotations);
+        }
+
+        let mut analyses: Vec<FileAnalysis> = file_map.into_values().collect();
+        analyses.sort_by(|a, b| b.importance_score.cmp(&a.importance_score));
+        analyses
+    }
+
+    fn build_categories(&self, responses: &[AgentResponse], files: &[GitHubFile]) -> Vec<PRCategory> {
+        let mut categories: HashMap<String, Vec<String>> = HashMap::new();
+
+        // Group files by agent concerns
+        for response in responses {
+            let agent_name = capitalize(response.agent_type.as_str());
+
+            if !response.findings.is_empty() {
+                let files_with_findings: Vec<String> = response
+                    .findings
+                    .iter()
+                    .map(|f| f.file.clone())
+                    .collect::<std::collections::HashSet<_>>()
+                    .into_iter()
+                    .collect();
+
+                categories.insert(
+                    format!("{} Concerns", agent_name),
+                    files_with_findings,
+                );
+            }
+        }
+
+        // Add uncategorized files
+        let all_flagged_files: std::collections::HashSet<String> = categories
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
+
+        let other_files: Vec<String> = files
+            .iter()
+            .map(|f| f.filename.clone())
+            .filter(|f| !all_flagged_files.contains(f))
+            .collect();
+
+        if !other_files.is_empty() {
+            categories.insert("Other Changes".to_string(), other_files);
+        }
+
+        categories
+            .into_iter()
+            .map(|(name, files)| PRCategory {
+                name: name.clone(),
+                description: get_category_description(&name),
+                files,
+            })
+            .collect()
+    }
+
+    fn build_key_changes(&self, responses: &[AgentResponse]) -> Vec<KeyChange> {
+        let mut key_changes: Vec<KeyChange> = Vec::new();
+
+        for response in responses {
+            for finding in &response.findings {
+                if matches!(finding.severity, Severity::Critical | Severity::High) {
+                    key_changes.push(KeyChange {
+                        file: finding.file.clone(),
+                        line: finding.line.map(|l| l as i64),
+                        description: finding.message.clone(),
+                        importance: format!("{:?}", finding.severity).to_lowercase(),
+                    });
+                }
+            }
+        }
+
+        // Limit to top 10
+        key_changes.truncate(10);
+        key_changes
+    }
+}
+
+fn parse_agent_response(response: &str) -> AppResult<RawAgentResponse> {
+    let json_str = if response.contains("```json") {
+        response
+            .split("```json")
+            .nth(1)
+            .and_then(|s| s.split("```").next())
+            .unwrap_or(response)
+    } else if response.contains("```") {
+        response.split("```").nth(1).unwrap_or(response)
+    } else {
+        response
+    };
+
+    serde_json::from_str(json_str.trim())
+        .map_err(|e| AppError::AIProvider(format!("Failed to parse agent response: {}", e)))
+}
+
+fn severity_to_annotation_type(severity: &Severity) -> AnnotationType {
+    match severity {
+        Severity::Critical | Severity::High => AnnotationType::Warning,
+        Severity::Medium | Severity::Low => AnnotationType::Info,
+        Severity::Info => AnnotationType::Suggestion,
+    }
+}
+
+fn merge_annotations(annotations: &[LineAnnotation]) -> Vec<LineAnnotation> {
+    let mut by_line: HashMap<u32, LineAnnotation> = HashMap::new();
+
+    for ann in annotations {
+        if let Some(existing) = by_line.get_mut(&ann.line_number) {
+            // Merge sources
+            for source in &ann.sources {
+                if !existing.sources.contains(source) {
+                    existing.sources.push(*source);
+                }
+            }
+            // Keep higher severity
+            if ann.severity.priority() > existing.severity.priority() {
+                existing.severity = ann.severity;
+                existing.annotation_type = ann.annotation_type.clone();
+            }
+            // Combine messages
+            existing.message = format!("{}\n\n{}", existing.message, ann.message);
+        } else {
+            by_line.insert(ann.line_number, ann.clone());
+        }
+    }
+
+    by_line.into_values().collect()
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+    }
+}
+
+fn get_category_description(name: &str) -> String {
+    match name {
+        "Security Concerns" => "Files with potential security vulnerabilities".to_string(),
+        "Architecture Concerns" => "Files with architectural or design issues".to_string(),
+        "Style Concerns" => "Files with style or consistency issues".to_string(),
+        "Performance Concerns" => "Files with potential performance issues".to_string(),
+        "Other Changes" => "Files without specific concerns flagged".to_string(),
+        _ => "".to_string(),
+    }
+}

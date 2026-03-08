@@ -1,7 +1,7 @@
 import { useState, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { ChevronRight, GitBranch, User } from "lucide-react";
+import { ChevronRight, GitBranch, User, Loader2 } from "lucide-react";
 import { github, GitHubRepo, GitHubPR } from "@/lib/api";
 import { cn, formatDistanceToNow } from "@/lib/utils";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -26,7 +26,7 @@ export function PRPanel({ repo }: PRPanelProps) {
   // Get PR numbers for checking user reviews
   const prNumbers = useMemo(() => prs?.map((pr) => pr.number) || [], [prs]);
 
-  const { data: reviewedPRNumbers = [] } = useQuery({
+  const { data: reviewedPRNumbers = [], isLoading: isLoadingReviews } = useQuery({
     queryKey: ["user-reviewed-prs", repo?.owner.login, repo?.name, prNumbers],
     queryFn: () =>
       github.getUserReviewedPRs(repo!.owner.login, repo!.name, prNumbers),
@@ -54,8 +54,35 @@ export function PRPanel({ repo }: PRPanelProps) {
 
   if (isLoading) {
     return (
-      <div className="p-4">
-        <div className="text-sm text-muted-foreground">Loading pull requests...</div>
+      <div className="h-full flex flex-col">
+        <div className="p-4 border-b">
+          <h2 className="font-semibold">{repo.full_name}</h2>
+          <p className="text-sm text-muted-foreground flex items-center gap-2">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            Loading pull requests...
+          </p>
+        </div>
+        <div className="p-4 space-y-3">
+          {/* Skeleton PR items */}
+          {[1, 2, 3].map((i) => (
+            <div key={i} className="animate-pulse">
+              <div className="flex items-start gap-2">
+                <div className="flex-1">
+                  <div className="flex items-center gap-2 mb-2">
+                    <div className="h-4 w-12 bg-muted rounded" />
+                    <div className="h-4 w-16 bg-muted rounded" />
+                  </div>
+                  <div className="h-5 w-3/4 bg-muted rounded mb-2" />
+                  <div className="flex items-center gap-3">
+                    <div className="h-4 w-4 bg-muted rounded-full" />
+                    <div className="h-3 w-20 bg-muted rounded" />
+                    <div className="h-3 w-16 bg-muted rounded" />
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
     );
   }
@@ -90,25 +117,35 @@ export function PRPanel({ repo }: PRPanelProps) {
           <TabsList className="w-full">
             <TabsTrigger value="active" className="flex-1">
               Active Reviews
-              {activeReviews.length > 0 && (
+              {isLoadingReviews ? (
+                <Loader2 className="ml-1.5 h-3 w-3 animate-spin" />
+              ) : activeReviews.length > 0 ? (
                 <span className="ml-1.5 bg-primary/20 text-primary px-1.5 py-0.5 rounded-full text-xs">
                   {activeReviews.length}
                 </span>
-              )}
+              ) : null}
             </TabsTrigger>
             <TabsTrigger value="open" className="flex-1">
               Open PRs
-              {openPRs.length > 0 && (
+              {isLoadingReviews ? (
+                <Loader2 className="ml-1.5 h-3 w-3 animate-spin" />
+              ) : openPRs.length > 0 ? (
                 <span className="ml-1.5 bg-muted px-1.5 py-0.5 rounded-full text-xs">
                   {openPRs.length}
                 </span>
-              )}
+              ) : null}
             </TabsTrigger>
           </TabsList>
         </div>
 
         <TabsContent value="active" className="flex-1 overflow-y-auto mt-0">
-          {activeReviews.length === 0 ? (
+          {isLoadingReviews ? (
+            <div className="p-4 space-y-3">
+              {[1, 2].map((i) => (
+                <PRSkeleton key={i} />
+              ))}
+            </div>
+          ) : activeReviews.length === 0 ? (
             <div className="p-4 text-sm text-muted-foreground text-center">
               No PRs where you've reviewed or commented
             </div>
@@ -118,7 +155,13 @@ export function PRPanel({ repo }: PRPanelProps) {
         </TabsContent>
 
         <TabsContent value="open" className="flex-1 overflow-y-auto mt-0">
-          {openPRs.length === 0 ? (
+          {isLoadingReviews ? (
+            <div className="p-4 space-y-3">
+              {[1, 2].map((i) => (
+                <PRSkeleton key={i} />
+              ))}
+            </div>
+          ) : openPRs.length === 0 ? (
             <div className="p-4 text-sm text-muted-foreground text-center">
               All open PRs have your reviews
             </div>
@@ -133,6 +176,27 @@ export function PRPanel({ repo }: PRPanelProps) {
 
 // Keep the old export name for backwards compatibility
 export { PRPanel as PRTree };
+
+function PRSkeleton() {
+  return (
+    <div className="animate-pulse rounded-md p-3">
+      <div className="flex items-start gap-2">
+        <div className="flex-1">
+          <div className="flex items-center gap-2 mb-2">
+            <div className="h-4 w-12 bg-muted rounded" />
+            <div className="h-4 w-16 bg-muted rounded" />
+          </div>
+          <div className="h-5 w-3/4 bg-muted rounded mb-2" />
+          <div className="flex items-center gap-3">
+            <div className="h-4 w-4 bg-muted rounded-full" />
+            <div className="h-3 w-20 bg-muted rounded" />
+            <div className="h-3 w-16 bg-muted rounded" />
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 interface PRListProps {
   prs: GitHubPR[];

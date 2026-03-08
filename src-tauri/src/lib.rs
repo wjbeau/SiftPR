@@ -7,7 +7,7 @@ mod github;
 use std::sync::Mutex;
 use tauri::State;
 
-use ai::AIClient;
+use ai::{AIClient, ModelInfo, OrchestratedAnalysis, Orchestrator};
 use db::{AISettings, Database, PRReviewState, User};
 use error::{AppError, AppResult};
 use github::{GitHubClient, GitHubFile, GitHubPR, GitHubRepo};
@@ -107,6 +107,15 @@ fn settings_delete_ai_provider(
     let app = state.lock().unwrap();
     let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
     app.db.delete_ai_setting(&user.id, &setting_id)
+}
+
+#[tauri::command]
+async fn settings_fetch_models(
+    provider: String,
+    api_key_or_url: String,
+) -> AppResult<Vec<ModelInfo>> {
+    let client = AIClient::new();
+    client.fetch_models(&provider, &api_key_or_url).await
 }
 
 // Favorites commands
@@ -292,6 +301,41 @@ async fn ai_analyze_pr(
     ).await
 }
 
+#[tauri::command]
+async fn ai_analyze_pr_orchestrated(
+    url: String,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<OrchestratedAnalysis> {
+    let (owner, repo, pr_number) = github::parse_pr_url(&url)?;
+
+    // Get user data and AI settings from DB (short lock)
+    let (token, provider, api_key, model) = {
+        let app = state.lock().unwrap();
+        let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+        let token = app.db.get_github_token(&user.id)?;
+        let (settings, key) = app.db.get_active_ai_setting(&user.id)?
+            .ok_or(AppError::AIProvider("No AI provider configured".to_string()))?;
+        (token, settings.provider, key, settings.model_preference)
+    };
+
+    // Get PR details (no lock held)
+    let github_client = GitHubClient::new();
+    let pr = github_client.get_pr(&token, &owner, &repo, pr_number).await?;
+    let files = github_client.get_pr_files(&token, &owner, &repo, pr_number).await?;
+
+    // Run orchestrated analysis with all agents (no lock held)
+    let orchestrator = Orchestrator::new();
+    orchestrator.analyze_pr(
+        &provider,
+        &api_key,
+        &model,
+        &pr.title,
+        pr.body.as_deref(),
+        &files,
+        None, // No codebase context for now (Phase 2)
+    ).await
+}
+
 // Review state commands
 
 #[tauri::command]
@@ -356,6 +400,7 @@ pub fn run() {
             settings_add_ai_provider,
             settings_activate_ai_provider,
             settings_delete_ai_provider,
+            settings_fetch_models,
             favorites_get,
             favorites_add,
             favorites_remove,
@@ -367,6 +412,7 @@ pub fn run() {
             github_get_pr_files,
             github_compare_commits,
             ai_analyze_pr,
+            ai_analyze_pr_orchestrated,
             review_get_state,
             review_save_state,
         ])

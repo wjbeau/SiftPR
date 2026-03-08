@@ -204,7 +204,8 @@ impl Database {
     pub fn add_ai_settings(&self, user_id: &str, provider: &str, api_key: &str, model: &str) -> AppResult<AISettings> {
         let conn = self.conn.lock().unwrap();
         let id = uuid::Uuid::new_v4().to_string();
-        let encrypted_key = encrypt(api_key)?;
+        // Trim whitespace from API key to avoid authentication issues
+        let encrypted_key = encrypt(api_key.trim())?;
         let now = Utc::now().to_rfc3339();
 
         conn.execute(

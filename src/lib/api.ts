@@ -19,6 +19,14 @@ export interface AISettings {
   updated_at: string;
 }
 
+export interface ModelInfo {
+  id: string;
+  name: string;
+  provider: string;
+  context_length: number | null;
+  description: string | null;
+}
+
 export interface GitHubRepo {
   id: number;
   name: string;
@@ -85,6 +93,91 @@ export interface KeyChange {
   importance: string;
 }
 
+// Agent system types
+export type AgentType = "security" | "architecture" | "style" | "performance";
+export type Severity = "critical" | "high" | "medium" | "low" | "info";
+export type AnnotationType = "warning" | "info" | "suggestion";
+
+export interface AgentSummary {
+  overview: string;
+  risk_assessment: string;
+  top_concerns: string[];
+}
+
+export interface AgentFinding {
+  file: string;
+  line: number | null;
+  message: string;
+  severity: Severity;
+  category: string;
+  suggestion: string | null;
+}
+
+export interface TokenUsage {
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+}
+
+export interface AgentResponse {
+  agent_type: AgentType;
+  summary: AgentSummary;
+  findings: AgentFinding[];
+  priority_files: string[];
+  processing_time_ms: number;
+  token_usage: TokenUsage | null;
+}
+
+export interface FailedAgent {
+  agent_type: AgentType;
+  error: string;
+}
+
+export interface FilePriority {
+  filename: string;
+  priority_score: number;
+  reasons: string[];
+}
+
+export interface LineAnnotation {
+  line_number: number;
+  row_index: number | null;
+  annotation_type: AnnotationType;
+  message: string;
+  sources: AgentType[];
+  severity: Severity;
+  category: string;
+  suggestion: string | null;
+}
+
+export interface FileContext {
+  summary: string;
+  purpose: string;
+  related_files: string[];
+}
+
+export interface FileAnalysis {
+  filename: string;
+  importance_score: number;
+  annotations: LineAnnotation[];
+  context: FileContext;
+  agent_findings: AgentFinding[];
+}
+
+export interface OrchestratedAnalysis {
+  summary: string;
+  risk_level: string;
+  file_priorities: FilePriority[];
+  file_analyses: FileAnalysis[];
+  categories: PRCategory[];
+  key_changes: KeyChange[];
+  suggested_review_order: string[];
+  agent_responses: AgentResponse[];
+  failed_agents: FailedAgent[];
+  total_processing_time_ms: number;
+  total_token_usage: TokenUsage;
+}
+
 // Auth API
 export const auth = {
   getOAuthUrl: () => invoke<string>("auth_get_oauth_url"),
@@ -102,6 +195,8 @@ export const settings = {
     invoke<void>("settings_activate_ai_provider", { settingId }),
   deleteAIProvider: (settingId: string) =>
     invoke<void>("settings_delete_ai_provider", { settingId }),
+  fetchModels: (provider: string, apiKeyOrUrl: string) =>
+    invoke<ModelInfo[]>("settings_fetch_models", { provider, apiKeyOrUrl }),
 };
 
 // GitHub API
@@ -122,6 +217,7 @@ export const github = {
 // AI API
 export const ai = {
   analyzePR: (url: string) => invoke<PRAnalysis>("ai_analyze_pr", { url }),
+  analyzePROrchestrated: (url: string) => invoke<OrchestratedAnalysis>("ai_analyze_pr_orchestrated", { url }),
 };
 
 // Favorites API
