@@ -1,4 +1,4 @@
-# ReviewBoss
+# SiftPR
 
 AI-powered desktop PR review tool that helps you identify important changes and organize your code review workflow.
 
