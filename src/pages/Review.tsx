@@ -3,7 +3,8 @@ import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import { ArrowLeft, FileCode, Loader2, Sparkles, Calendar, MessageSquare, User, Users, GitPullRequest, RefreshCw, ClipboardList, AlertTriangle, BookOpen, Files, ChevronDown, Check, CheckCircle2, XCircle, MessageCircle, Eye, EyeOff, Plus, Send, Filter, History, Pencil, Trash2, X, Shield, Layers, Paintbrush, Zap, FolderOpen, Settings } from "lucide-react";
-import { github, GitHubFile, GitHubPR, review, ai, analysis as analysisApi, OrchestratedAnalysis, FileAnalysis, LineAnnotation, AgentType, codebase, LinkedRepo } from "@/lib/api";
+import { github, GitHubFile, GitHubPR, review, ai, analysis as analysisApi, OrchestratedAnalysis, FileAnalysis, LineAnnotation, AgentType, codebase, LinkedRepo, ReviewComment } from "@/lib/api";
+import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn, formatDistanceToNow } from "@/lib/utils";
@@ -25,6 +26,7 @@ export function Review() {
     repo: string;
     prNumber: string;
   }>();
+  const { user } = useAuth();
 
   const [selectedFile, setSelectedFile] = useState<GitHubFile | null>(null);
   const [viewedFiles, setViewedFiles] = useState<Set<string>>(new Set());
@@ -37,6 +39,8 @@ export function Review() {
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [analysisMode, setAnalysisMode] = useState<"pr_only" | "with_context">("pr_only");
   const [showFullAnalysis, setShowFullAnalysis] = useState(false);
+  const [isSubmittingReview, setIsSubmittingReview] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
 
   const prUrl = `https://github.com/${owner}/${repo}/pull/${prNumber}`;
   const repoFullName = `${owner}/${repo}`;
@@ -181,28 +185,65 @@ export function Review() {
   }, [analysis, selectedFile]);
 
   const submitReview = useCallback(async (action: ReviewAction) => {
-    // TODO: Implement GitHub API call to submit review
-    console.log("Submitting review:", { action, body: reviewBody, comments: pendingComments });
+    if (!owner || !repo || !prNumberInt) return;
 
-    // Save the review state (mark current commit as reviewed)
-    if (owner && repo && prNumberInt && pr?.head.sha) {
-      try {
-        await review.saveState(
-          owner,
-          repo,
-          prNumberInt,
-          pr.head.sha,
-          Array.from(viewedFiles)
-        );
-      } catch (e) {
-        console.error("Failed to save review state:", e);
+    setIsSubmittingReview(true);
+    setSubmitError(null);
+
+    try {
+      // Convert action to GitHub event format
+      const event = action === "approve"
+        ? "APPROVE"
+        : action === "request_changes"
+        ? "REQUEST_CHANGES"
+        : "COMMENT";
+
+      // Convert pending comments to GitHub format
+      const comments: ReviewComment[] = pendingComments.map((c) => ({
+        path: c.file,
+        line: c.line,
+        side: "RIGHT" as const,
+        body: c.body,
+      }));
+
+      // Submit the review to GitHub
+      await github.submitReview(
+        owner,
+        repo,
+        prNumberInt,
+        event,
+        reviewBody,
+        comments
+      );
+
+      // Save the review state (mark current commit as reviewed)
+      if (pr?.head.sha) {
+        try {
+          await review.saveState(
+            owner,
+            repo,
+            prNumberInt,
+            pr.head.sha,
+            Array.from(viewedFiles)
+          );
+        } catch (e) {
+          console.error("Failed to save review state:", e);
+        }
       }
-    }
 
-    alert(`Review submitted: ${action}\n\nThis will integrate with GitHub API soon.`);
-    setPendingComments([]);
-    setReviewBody("");
-    setShowReviewDialog(false);
+      // Clear the form
+      setPendingComments([]);
+      setReviewBody("");
+      setShowReviewDialog(false);
+    } catch (e) {
+      console.error("Failed to submit review:", e);
+      const errorMsg = typeof e === "string"
+        ? e
+        : (e as { message?: string })?.message || "Failed to submit review";
+      setSubmitError(errorMsg);
+    } finally {
+      setIsSubmittingReview(false);
+    }
   }, [reviewBody, pendingComments, owner, repo, prNumberInt, pr?.head.sha, viewedFiles]);
 
   const isLoading = prLoading || filesLoading;
@@ -366,33 +407,52 @@ export function Review() {
               )}
             </div>
             <div className="flex items-center gap-2">
+              {submitError && (
+                <span className="text-xs text-destructive mr-2">{submitError}</span>
+              )}
               <Button
                 variant="outline"
                 size="sm"
                 onClick={() => setShowReviewDialog(true)}
+                disabled={isSubmittingReview}
                 className="gap-1.5"
               >
                 <MessageSquare className="h-4 w-4" />
                 Comment
               </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => submitReview("approve")}
-                className="gap-1.5 text-green-600 hover:text-green-700 hover:bg-green-50 dark:hover:bg-green-950/30"
-              >
-                <CheckCircle2 className="h-4 w-4" />
-                Approve
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => submitReview("request_changes")}
-                className="gap-1.5 text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30"
-              >
-                <XCircle className="h-4 w-4" />
-                Request Changes
-              </Button>
+              {/* Only show Approve/Request Changes if user is not the PR author */}
+              {user?.github_username !== pr?.user.login && (
+                <>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => submitReview("approve")}
+                    disabled={isSubmittingReview}
+                    className="gap-1.5 text-green-600 hover:text-green-700 hover:bg-green-50 dark:hover:bg-green-950/30"
+                  >
+                    {isSubmittingReview ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <CheckCircle2 className="h-4 w-4" />
+                    )}
+                    Approve
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => submitReview("request_changes")}
+                    disabled={isSubmittingReview}
+                    className="gap-1.5 text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30"
+                  >
+                    {isSubmittingReview ? (
+                      <Loader2 className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <XCircle className="h-4 w-4" />
+                    )}
+                    Request Changes
+                  </Button>
+                </>
+              )}
             </div>
           </div>
 
