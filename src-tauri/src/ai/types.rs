@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Agent types that perform specialized analysis
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentType {
     Security,

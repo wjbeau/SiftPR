@@ -16,6 +16,26 @@ use super::types::{
 
 const AGENT_TIMEOUT_SECS: u64 = 60;
 
+/// Configuration for a single agent
+#[derive(Debug, Clone)]
+pub struct AgentConfig {
+    pub agent_type: AgentType,
+    pub enabled: bool,
+    pub model_override: Option<String>,
+    pub custom_prompt: Option<String>,
+}
+
+impl AgentConfig {
+    pub fn default_for(agent_type: AgentType) -> Self {
+        Self {
+            agent_type,
+            enabled: true,
+            model_override: None,
+            custom_prompt: None,
+        }
+    }
+}
+
 pub struct Orchestrator {
     client: AIClient,
 }
@@ -32,52 +52,75 @@ impl Orchestrator {
         &self,
         provider: &str,
         api_key: &str,
-        model: &str,
+        default_model: &str,
         pr_title: &str,
         pr_body: Option<&str>,
         files: &[GitHubFile],
         codebase_context: Option<&str>,
+        agent_configs: Option<Vec<AgentConfig>>,
     ) -> AppResult<OrchestratedAnalysis> {
         let start_time = Instant::now();
         let files_context = build_files_context(files);
 
-        // Run all agents in parallel
+        // Build agent configs, using defaults if not provided
+        let configs: HashMap<AgentType, AgentConfig> = agent_configs
+            .unwrap_or_else(|| vec![
+                AgentConfig::default_for(AgentType::Security),
+                AgentConfig::default_for(AgentType::Architecture),
+                AgentConfig::default_for(AgentType::Style),
+                AgentConfig::default_for(AgentType::Performance),
+            ])
+            .into_iter()
+            .map(|c| (c.agent_type, c))
+            .collect();
+
+        // Get configs for each agent (default to enabled if not configured)
+        let security_config = configs.get(&AgentType::Security).cloned()
+            .unwrap_or_else(|| AgentConfig::default_for(AgentType::Security));
+        let architecture_config = configs.get(&AgentType::Architecture).cloned()
+            .unwrap_or_else(|| AgentConfig::default_for(AgentType::Architecture));
+        let style_config = configs.get(&AgentType::Style).cloned()
+            .unwrap_or_else(|| AgentConfig::default_for(AgentType::Style));
+        let performance_config = configs.get(&AgentType::Performance).cloned()
+            .unwrap_or_else(|| AgentConfig::default_for(AgentType::Performance));
+
+        // Run enabled agents in parallel
         let (security_result, architecture_result, style_result, performance_result) = tokio::join!(
-            self.run_agent(
-                AgentType::Security,
+            self.run_agent_if_enabled(
+                &security_config,
                 provider,
                 api_key,
-                model,
+                default_model,
                 pr_title,
                 pr_body,
                 &files_context,
                 codebase_context,
             ),
-            self.run_agent(
-                AgentType::Architecture,
+            self.run_agent_if_enabled(
+                &architecture_config,
                 provider,
                 api_key,
-                model,
+                default_model,
                 pr_title,
                 pr_body,
                 &files_context,
                 codebase_context,
             ),
-            self.run_agent(
-                AgentType::Style,
+            self.run_agent_if_enabled(
+                &style_config,
                 provider,
                 api_key,
-                model,
+                default_model,
                 pr_title,
                 pr_body,
                 &files_context,
                 codebase_context,
             ),
-            self.run_agent(
-                AgentType::Performance,
+            self.run_agent_if_enabled(
+                &performance_config,
                 provider,
                 api_key,
-                model,
+                default_model,
                 pr_title,
                 pr_body,
                 &files_context,
@@ -96,16 +139,19 @@ impl Orchestrator {
             (AgentType::Performance, performance_result),
         ] {
             match result {
-                Ok(response) => {
+                Some(Ok(response)) => {
                     println!("[AI] {} agent succeeded with {} findings", agent_type.as_str(), response.findings.len());
                     agent_responses.push(response);
                 }
-                Err(e) => {
+                Some(Err(e)) => {
                     println!("[AI] {} agent failed: {}", agent_type.as_str(), e);
                     failed_agents.push(FailedAgent {
                         agent_type,
                         error: e.to_string(),
                     });
+                }
+                None => {
+                    println!("[AI] {} agent is disabled, skipping", agent_type.as_str());
                 }
             }
         }
@@ -113,7 +159,7 @@ impl Orchestrator {
         // Require at least one successful agent
         if agent_responses.is_empty() {
             return Err(AppError::AIProvider(
-                "All agents failed. Please try again.".to_string(),
+                "All agents failed or are disabled. Please try again.".to_string(),
             ));
         }
 
@@ -128,6 +174,40 @@ impl Orchestrator {
         Ok(analysis)
     }
 
+    async fn run_agent_if_enabled(
+        &self,
+        config: &AgentConfig,
+        provider: &str,
+        api_key: &str,
+        default_model: &str,
+        pr_title: &str,
+        pr_body: Option<&str>,
+        files_context: &str,
+        codebase_context: Option<&str>,
+    ) -> Option<AppResult<AgentResponse>> {
+        if !config.enabled {
+            return None;
+        }
+
+        // Use model override if provided, otherwise use default
+        let model = config.model_override.as_deref().unwrap_or(default_model);
+
+        // Use custom prompt if provided
+        let custom_prompt = config.custom_prompt.as_deref();
+
+        Some(self.run_agent(
+            config.agent_type,
+            provider,
+            api_key,
+            model,
+            pr_title,
+            pr_body,
+            files_context,
+            codebase_context,
+            custom_prompt,
+        ).await)
+    }
+
     async fn run_agent(
         &self,
         agent_type: AgentType,
@@ -138,10 +218,14 @@ impl Orchestrator {
         pr_body: Option<&str>,
         files_context: &str,
         codebase_context: Option<&str>,
+        custom_system_prompt: Option<&str>,
     ) -> AppResult<AgentResponse> {
         let start_time = Instant::now();
 
-        let system_prompt = get_system_prompt(agent_type);
+        // Use custom prompt if provided, otherwise use default
+        let default_prompt = get_system_prompt(agent_type);
+        let system_prompt = custom_system_prompt.unwrap_or(default_prompt);
+
         let user_prompt = build_agent_prompt(
             agent_type,
             pr_title,

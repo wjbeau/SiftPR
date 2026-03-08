@@ -1,12 +1,12 @@
 import { useState, useMemo, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "react-router-dom";
 import { ChevronRight, GitBranch, User, Loader2, RefreshCw } from "lucide-react";
 import { github } from "@/lib/api";
 import type { GitHubRepo, GitHubPR } from "@/lib/api";
 import { cn, formatDistanceToNow } from "@/lib/utils";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
+import { useTabs } from "@/contexts/TabsContext";
 
 const STORAGE_KEY_PRS_PREFIX = "siftpr-cached-prs-";
 
@@ -358,6 +358,7 @@ interface PRNodeItemProps {
 
 function PRNodeItem({ node, depth, isTreeView, owner, repoName }: PRNodeItemProps) {
   const { pr } = node;
+  const { openTab } = useTabs();
   const hasChildren = node.children.length > 0;
   const [isExpanded, setIsExpanded] = useState(true);
 
@@ -367,20 +368,38 @@ function PRNodeItem({ node, depth, isTreeView, owner, repoName }: PRNodeItemProp
     setIsExpanded(!isExpanded);
   };
 
+  const handleOpenPR = () => {
+    openTab({
+      title: `#${pr.number} ${pr.title}`,
+      type: "pr",
+      path: `/review/${owner}/${repoName}/${pr.number}`,
+      prInfo: {
+        owner,
+        repo: repoName,
+        number: pr.number,
+      },
+    });
+  };
+
   const assignees = pr.assignees?.filter(Boolean) || [];
 
   return (
     <li className={cn(depth > 0 && "ml-4 pl-3 border-l-2 border-blue-400 dark:border-blue-600")}>
       <div
         className={cn(
-          "rounded-md hover:bg-accent transition-colors",
+          "rounded-md hover:bg-accent transition-colors cursor-pointer",
           depth > 0 && "bg-muted/30"
         )}
+        onClick={handleOpenPR}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            handleOpenPR();
+          }
+        }}
+        role="button"
+        tabIndex={0}
       >
-        <Link
-          to={`/review/${owner}/${repoName}/${pr.number}`}
-          className="block py-3 px-3"
-        >
+        <div className="block py-3 px-3">
           <div className="flex items-start gap-2">
             {hasChildren && isTreeView ? (
               <button
@@ -487,7 +506,7 @@ function PRNodeItem({ node, depth, isTreeView, owner, repoName }: PRNodeItemProp
               )}
             </div>
           </div>
-        </Link>
+        </div>
       </div>
       {hasChildren && isExpanded && (
         <ul className="mt-1">

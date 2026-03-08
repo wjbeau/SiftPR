@@ -8,7 +8,7 @@ mod github;
 use std::sync::Mutex;
 use tauri::State;
 
-use ai::{AIClient, ModelInfo, OrchestratedAnalysis, Orchestrator, prompts, types::AgentType};
+use ai::{AIClient, ModelInfo, OrchestratedAnalysis, Orchestrator, prompts, types::AgentType, orchestrator::AgentConfig};
 use db::{AISettings, AgentSettings, CodebaseProfile, Database, LinkedRepo, PRReviewState, User};
 use error::{AppError, AppResult};
 use github::{GitHubClient, GitHubFile, GitHubPR, GitHubRepo};
@@ -334,8 +334,8 @@ async fn ai_analyze_pr_orchestrated(
     let (owner, repo, pr_number) = github::parse_pr_url(&url)?;
     let repo_full_name = format!("{}/{}", owner, repo);
 
-    // Get user data and AI settings from DB (short lock)
-    let (token, provider, api_key, model, codebase_context) = {
+    // Get user data, AI settings, and agent settings from DB (short lock)
+    let (token, provider, api_key, model, codebase_context, agent_configs) = {
         let app = state.lock().unwrap();
         let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
         let token = app.db.get_github_token(&user.id)?;
@@ -357,7 +357,24 @@ async fn ai_analyze_pr_orchestrated(
             None
         };
 
-        (token, settings.provider, key, settings.model_preference, context)
+        // Get agent settings and convert to AgentConfigs
+        let agent_settings = app.db.get_agent_settings(&user.id)?;
+        let configs: Vec<AgentConfig> = [
+            AgentType::Security,
+            AgentType::Architecture,
+            AgentType::Style,
+            AgentType::Performance,
+        ].iter().map(|agent_type| {
+            let setting = agent_settings.iter().find(|s| s.agent_type == agent_type.as_str());
+            AgentConfig {
+                agent_type: *agent_type,
+                enabled: setting.map(|s| s.enabled).unwrap_or(true),
+                model_override: setting.and_then(|s| s.model_override.clone()),
+                custom_prompt: setting.and_then(|s| s.custom_prompt.clone()),
+            }
+        }).collect();
+
+        (token, settings.provider, key, settings.model_preference, context, configs)
     };
 
     // Get PR details (no lock held)
@@ -375,6 +392,7 @@ async fn ai_analyze_pr_orchestrated(
         pr.body.as_deref(),
         &files,
         codebase_context.as_deref(),
+        Some(agent_configs),
     ).await
 }
 
