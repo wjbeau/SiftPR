@@ -13,7 +13,7 @@ function App() {
         <Route path="/login" element={<Login />} />
         <Route element={<Layout />}>
           <Route path="/" element={<Home />} />
-          <Route path="/settings" element={<Settings />} />
+          <Route path="/settings/*" element={<Settings />} />
           <Route path="/review/:owner/:repo/:prNumber" element={<Review />} />
         </Route>
       </Routes>

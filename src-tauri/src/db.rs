@@ -101,6 +101,18 @@ impl Database {
                 updated_at TEXT NOT NULL,
                 UNIQUE(user_id, repo_owner, repo_name, pr_number)
             );
+
+            CREATE TABLE IF NOT EXISTS linked_repos (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id),
+                repo_full_name TEXT NOT NULL,
+                local_path TEXT NOT NULL,
+                last_analyzed_commit TEXT,
+                profile_data TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(user_id, repo_full_name)
+            );
             "#,
         )?;
 
@@ -286,6 +298,18 @@ impl Database {
         }
     }
 
+    pub fn get_ai_setting_api_key(&self, setting_id: &str) -> AppResult<String> {
+        let conn = self.conn.lock().unwrap();
+        let encrypted_key: String = conn.query_row(
+            "SELECT api_key FROM user_ai_settings WHERE id = ?1",
+            params![setting_id],
+            |row| row.get(0),
+        ).map_err(|_| AppError::NotFound("AI setting not found".to_string()))?;
+
+        let api_key = decrypt(&encrypted_key)?;
+        Ok(api_key)
+    }
+
     // Favorite repos operations
 
     pub fn get_favorite_repos(&self, user_id: &str) -> AppResult<Vec<i64>> {
@@ -400,6 +424,119 @@ impl Database {
             updated_at: now,
         })
     }
+
+    // Linked Repos operations
+
+    pub fn get_linked_repos(&self, user_id: &str) -> AppResult<Vec<LinkedRepo>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, user_id, repo_full_name, local_path, last_analyzed_commit, profile_data, created_at, updated_at
+             FROM linked_repos WHERE user_id = ?1"
+        )?;
+
+        let repos = stmt.query_map(params![user_id], |row| {
+            let profile_json: Option<String> = row.get(5)?;
+            let profile_data = profile_json.and_then(|json| serde_json::from_str(&json).ok());
+            Ok(LinkedRepo {
+                id: row.get(0)?,
+                user_id: row.get(1)?,
+                repo_full_name: row.get(2)?,
+                local_path: row.get(3)?,
+                last_analyzed_commit: row.get(4)?,
+                profile_data,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+
+        Ok(repos)
+    }
+
+    pub fn get_linked_repo(&self, user_id: &str, repo_full_name: &str) -> AppResult<Option<LinkedRepo>> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.query_row(
+            "SELECT id, user_id, repo_full_name, local_path, last_analyzed_commit, profile_data, created_at, updated_at
+             FROM linked_repos WHERE user_id = ?1 AND repo_full_name = ?2",
+            params![user_id, repo_full_name],
+            |row| {
+                let profile_json: Option<String> = row.get(5)?;
+                let profile_data = profile_json.and_then(|json| serde_json::from_str(&json).ok());
+                Ok(LinkedRepo {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    repo_full_name: row.get(2)?,
+                    local_path: row.get(3)?,
+                    last_analyzed_commit: row.get(4)?,
+                    profile_data,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            },
+        ).ok();
+
+        Ok(result)
+    }
+
+    pub fn link_repo(&self, user_id: &str, repo_full_name: &str, local_path: &str) -> AppResult<LinkedRepo> {
+        let conn = self.conn.lock().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+
+        conn.execute(
+            r#"
+            INSERT INTO linked_repos (id, user_id, repo_full_name, local_path, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+            ON CONFLICT(user_id, repo_full_name) DO UPDATE SET
+                local_path = ?4,
+                updated_at = ?5
+            "#,
+            params![id, user_id, repo_full_name, local_path, now],
+        )?;
+
+        Ok(LinkedRepo {
+            id,
+            user_id: user_id.to_string(),
+            repo_full_name: repo_full_name.to_string(),
+            local_path: local_path.to_string(),
+            last_analyzed_commit: None,
+            profile_data: None,
+            created_at: now.clone(),
+            updated_at: now,
+        })
+    }
+
+    pub fn update_repo_profile(
+        &self,
+        user_id: &str,
+        repo_full_name: &str,
+        commit_sha: &str,
+        profile: &CodebaseProfile,
+    ) -> AppResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+        let profile_json = serde_json::to_string(profile)
+            .map_err(|e| AppError::Internal(format!("Failed to serialize profile: {}", e)))?;
+
+        conn.execute(
+            r#"
+            UPDATE linked_repos
+            SET last_analyzed_commit = ?1, profile_data = ?2, updated_at = ?3
+            WHERE user_id = ?4 AND repo_full_name = ?5
+            "#,
+            params![commit_sha, profile_json, now, user_id, repo_full_name],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn unlink_repo(&self, user_id: &str, repo_full_name: &str) -> AppResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM linked_repos WHERE user_id = ?1 AND repo_full_name = ?2",
+            params![user_id, repo_full_name],
+        )?;
+        Ok(())
+    }
 }
 
 fn get_database_path() -> AppResult<PathBuf> {
@@ -439,4 +576,50 @@ pub struct PRReviewState {
     pub viewed_files: Vec<String>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkedRepo {
+    pub id: String,
+    pub user_id: String,
+    pub repo_full_name: String,
+    pub local_path: String,
+    pub last_analyzed_commit: Option<String>,
+    pub profile_data: Option<CodebaseProfile>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodebaseProfile {
+    pub directory_structure: Vec<String>,
+    pub file_count: u32,
+    pub language_breakdown: std::collections::HashMap<String, u32>,
+    pub config_files: Vec<ConfigFile>,
+    pub patterns: CodebasePatterns,
+    pub style_summary: StyleSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigFile {
+    pub path: String,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodebasePatterns {
+    pub naming_convention: String,
+    pub file_organization: String,
+    pub common_abstractions: Vec<String>,
+    pub import_style: String,
+    pub error_handling_pattern: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StyleSummary {
+    pub indentation: String,
+    pub quote_style: String,
+    pub trailing_commas: bool,
+    pub documentation_style: String,
+    pub typical_file_length: u32,
 }

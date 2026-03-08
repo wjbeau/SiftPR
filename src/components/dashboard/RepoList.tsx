@@ -1,8 +1,9 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { Star } from "lucide-react";
+import { Star, RefreshCw } from "lucide-react";
 import { github, favorites, GitHubRepo } from "@/lib/api";
 import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
 import {
   Accordion,
   AccordionContent,
@@ -10,26 +11,64 @@ import {
   AccordionTrigger,
 } from "@/components/ui/accordion";
 
+const STORAGE_KEY_REPOS = "siftpr-cached-repos";
+const STORAGE_KEY_FAVORITES = "siftpr-cached-favorites";
+
 interface RepoListProps {
   selectedRepo: GitHubRepo | null;
   onSelectRepo: (repo: GitHubRepo) => void;
+}
+
+// Load cached data from localStorage
+function getCachedRepos(): GitHubRepo[] | undefined {
+  try {
+    const cached = localStorage.getItem(STORAGE_KEY_REPOS);
+    return cached ? JSON.parse(cached) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function getCachedFavorites(): number[] | undefined {
+  try {
+    const cached = localStorage.getItem(STORAGE_KEY_FAVORITES);
+    return cached ? JSON.parse(cached) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export function RepoList({ selectedRepo, onSelectRepo }: RepoListProps) {
   const [search, setSearch] = useState("");
   const queryClient = useQueryClient();
 
-  const { data: repos, isLoading, error } = useQuery({
+  const { data: repos, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ["repos"],
     queryFn: () => github.getRepos(),
     staleTime: 1000 * 60 * 5, // 5 minutes
+    placeholderData: getCachedRepos,
   });
 
   const { data: favoriteIds = [] } = useQuery({
     queryKey: ["favorites"],
     queryFn: () => favorites.get(),
     staleTime: 1000 * 60 * 5,
+    placeholderData: getCachedFavorites,
   });
+
+  // Cache repos to localStorage when they change
+  useEffect(() => {
+    if (repos && repos.length > 0) {
+      localStorage.setItem(STORAGE_KEY_REPOS, JSON.stringify(repos));
+    }
+  }, [repos]);
+
+  // Cache favorites to localStorage when they change
+  useEffect(() => {
+    if (favoriteIds && favoriteIds.length > 0) {
+      localStorage.setItem(STORAGE_KEY_FAVORITES, JSON.stringify(favoriteIds));
+    }
+  }, [favoriteIds]);
 
   const addFavorite = useMutation({
     mutationFn: (repo: GitHubRepo) => favorites.add(repo.id, repo.full_name),
@@ -95,7 +134,10 @@ export function RepoList({ selectedRepo, onSelectRepo }: RepoListProps) {
     );
   }, [favoriteRepos, search]);
 
-  if (isLoading) {
+  // Only show loading state on initial load (no cached data)
+  const showLoading = isLoading && !repos;
+
+  if (showLoading) {
     return (
       <div className="p-4">
         <div className="text-sm text-muted-foreground">Loading repositories...</div>
@@ -103,7 +145,7 @@ export function RepoList({ selectedRepo, onSelectRepo }: RepoListProps) {
     );
   }
 
-  if (error) {
+  if (error && !repos) {
     return (
       <div className="p-4">
         <div className="text-sm text-destructive">Failed to load repositories</div>
@@ -119,13 +161,28 @@ export function RepoList({ selectedRepo, onSelectRepo }: RepoListProps) {
 
   return (
     <div className="flex flex-col h-full">
-      <div className="p-3 border-b">
-        <Input
-          placeholder="Search repositories..."
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          className="h-9"
-        />
+      <div className="p-3 border-b space-y-2">
+        <div className="flex items-center gap-2">
+          <Input
+            placeholder="Search repositories..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="h-8 flex-1"
+          />
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 flex-shrink-0"
+            onClick={() => refetch()}
+            disabled={isFetching}
+            title="Refresh repositories"
+          >
+            <RefreshCw className={`h-4 w-4 ${isFetching ? "animate-spin" : ""}`} />
+          </Button>
+        </div>
+        {isFetching && repos && (
+          <div className="text-xs text-muted-foreground">Refreshing...</div>
+        )}
       </div>
       <div className="flex-1 overflow-y-auto">
         {filteredRepos.length === 0 && filteredFavorites.length === 0 ? (

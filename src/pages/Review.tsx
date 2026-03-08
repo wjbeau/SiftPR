@@ -2,8 +2,8 @@ import { useState, useMemo, useCallback, useEffect } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
-import { ArrowLeft, FileCode, Loader2, Sparkles, Calendar, MessageSquare, User, Users, GitPullRequest, RefreshCw, ClipboardList, AlertTriangle, BookOpen, Files, ChevronDown, Check, CheckCircle2, XCircle, MessageCircle, Eye, EyeOff, Plus, Send, Filter, History, Pencil, Trash2, X, Shield, Layers, Paintbrush, Zap } from "lucide-react";
-import { github, GitHubFile, GitHubPR, review, ai, OrchestratedAnalysis, FileAnalysis, LineAnnotation, AgentType } from "@/lib/api";
+import { ArrowLeft, FileCode, Loader2, Sparkles, Calendar, MessageSquare, User, Users, GitPullRequest, RefreshCw, ClipboardList, AlertTriangle, BookOpen, Files, ChevronDown, Check, CheckCircle2, XCircle, MessageCircle, Eye, EyeOff, Plus, Send, Filter, History, Pencil, Trash2, X, Shield, Layers, Paintbrush, Zap, FolderOpen, Settings } from "lucide-react";
+import { github, GitHubFile, GitHubPR, review, ai, OrchestratedAnalysis, FileAnalysis, LineAnnotation, AgentType, codebase, LinkedRepo } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn, formatDistanceToNow } from "@/lib/utils";
@@ -35,8 +35,11 @@ export function Review() {
   const [analysis, setAnalysis] = useState<OrchestratedAnalysis | null>(null);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [analysisMode, setAnalysisMode] = useState<"pr_only" | "with_context">("pr_only");
+  const [showFullAnalysis, setShowFullAnalysis] = useState(false);
 
   const prUrl = `https://github.com/${owner}/${repo}/pull/${prNumber}`;
+  const repoFullName = `${owner}/${repo}`;
   const prNumberInt = prNumber ? parseInt(prNumber, 10) : 0;
 
   const toggleFileViewed = useCallback((filename: string) => {
@@ -96,6 +99,13 @@ export function Review() {
              reviewState.last_reviewed_commit !== pr.head.sha,
   });
 
+  // Get linked repo for local context
+  const { data: linkedRepo } = useQuery({
+    queryKey: ["codebase", "linked", repoFullName],
+    queryFn: () => codebase.getLinkedRepo(repoFullName),
+    enabled: !!owner && !!repo,
+  });
+
   // Initialize viewed files from saved state (only on first load)
   const [hasInitializedViewedFiles, setHasInitializedViewedFiles] = useState(false);
   useEffect(() => {
@@ -121,8 +131,9 @@ export function Review() {
     setIsAnalyzing(true);
     setAnalysisError(null);
     try {
-      console.log("Starting analysis for:", prUrl);
-      const result = await ai.analyzePROrchestrated(prUrl);
+      const withContext = analysisMode === "with_context";
+      console.log("Starting analysis for:", prUrl, "with context:", withContext);
+      const result = await ai.analyzePROrchestrated(prUrl, withContext);
       console.log("Analysis result:", result);
       setAnalysis(result);
     } catch (e) {
@@ -135,7 +146,7 @@ export function Review() {
     } finally {
       setIsAnalyzing(false);
     }
-  }, [prUrl]);
+  }, [prUrl, analysisMode]);
 
   // Get file analysis for selected file
   const selectedFileAnalysis = useMemo(() => {
@@ -235,31 +246,48 @@ export function Review() {
           </TabsList>
         </div>
 
-        <TabsContent value="summary" className="overflow-hidden">
-          <Tabs defaultValue="overview" className="h-full">
-            <div className="border-b px-6 bg-muted/30">
-              <TabsList className="bg-transparent">
-                <TabsTrigger value="overview">Overview</TabsTrigger>
-                <TabsTrigger value="ai-analytics" className="gap-2">
-                  <Sparkles className="h-3.5 w-3.5" />
-                  AI Analytics
-                </TabsTrigger>
-              </TabsList>
-            </div>
-
-            <TabsContent value="overview" className="overflow-y-auto p-6 pb-12">
-              <OverviewPanel pr={pr} files={files || []} />
-            </TabsContent>
-
-            <TabsContent value="ai-analytics" className="overflow-y-auto p-6 pb-12">
+        <TabsContent value="summary" className="overflow-y-auto">
+          {showFullAnalysis ? (
+            <div className="p-6 pb-12">
+              <div className="mb-4">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setShowFullAnalysis(false)}
+                  className="gap-1.5"
+                >
+                  <ArrowLeft className="h-4 w-4" />
+                  Back to Summary
+                </Button>
+              </div>
               <AIAnalyticsPanel
                 analysis={analysis}
                 isAnalyzing={isAnalyzing}
                 error={analysisError}
                 onRunAnalysis={runAnalysis}
+                linkedRepo={linkedRepo}
+                analysisMode={analysisMode}
+                onSetAnalysisMode={setAnalysisMode}
               />
-            </TabsContent>
-          </Tabs>
+            </div>
+          ) : (
+            <div className="p-6 pb-12 space-y-6">
+              {/* AI Summary Section */}
+              <AISummarySection
+                analysis={analysis}
+                isAnalyzing={isAnalyzing}
+                error={analysisError}
+                onRunAnalysis={runAnalysis}
+                onViewFullAnalysis={() => setShowFullAnalysis(true)}
+                linkedRepo={linkedRepo}
+                analysisMode={analysisMode}
+                onSetAnalysisMode={setAnalysisMode}
+              />
+
+              {/* PR Overview */}
+              <OverviewPanel pr={pr} files={files || []} />
+            </div>
+          )}
         </TabsContent>
 
         <TabsContent value="changes" className="!flex-col overflow-hidden">
@@ -689,14 +717,207 @@ function AnalysisLoadingState() {
   );
 }
 
+interface AISummarySectionProps {
+  analysis: OrchestratedAnalysis | null;
+  isAnalyzing: boolean;
+  error: string | null;
+  onRunAnalysis: () => void;
+  onViewFullAnalysis: () => void;
+  linkedRepo: LinkedRepo | null | undefined;
+  analysisMode: "pr_only" | "with_context";
+  onSetAnalysisMode: (mode: "pr_only" | "with_context") => void;
+}
+
+function AISummarySection({
+  analysis,
+  isAnalyzing,
+  error,
+  onRunAnalysis,
+  onViewFullAnalysis,
+  linkedRepo,
+  analysisMode,
+  onSetAnalysisMode,
+}: AISummarySectionProps) {
+  const hasLinkedRepo = linkedRepo && linkedRepo.profile_data;
+
+  const getRiskColor = (level: string) => {
+    switch (level.toLowerCase()) {
+      case "high":
+        return "text-red-600 bg-red-100 dark:bg-red-950/50";
+      case "medium":
+        return "text-amber-600 bg-amber-100 dark:bg-amber-950/50";
+      default:
+        return "text-green-600 bg-green-100 dark:bg-green-950/50";
+    }
+  };
+
+  // Analyzing state - compact loading indicator
+  if (isAnalyzing) {
+    return (
+      <div className="rounded-lg border bg-gradient-to-r from-purple-50 to-blue-50 dark:from-purple-950/30 dark:to-blue-950/30 p-4">
+        <div className="flex items-center gap-3">
+          <div className="p-2 bg-purple-100 dark:bg-purple-900/50 rounded-lg">
+            <Loader2 className="h-5 w-5 text-purple-500 animate-spin" />
+          </div>
+          <div className="flex-1">
+            <h3 className="font-medium flex items-center gap-2">
+              <Sparkles className="h-4 w-4 text-purple-500" />
+              Running AI Analysis
+            </h3>
+            <p className="text-sm text-muted-foreground">
+              4 specialized agents analyzing this PR...
+            </p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Analysis complete - show summary
+  if (analysis) {
+    const totalFindings = analysis.agent_responses.reduce((sum, r) => sum + r.findings.length, 0);
+    const criticalCount = analysis.agent_responses.reduce(
+      (sum, r) => sum + r.findings.filter(f => f.severity === "critical" || f.severity === "high").length,
+      0
+    );
+
+    return (
+      <div className="rounded-lg border bg-gradient-to-r from-purple-50 to-blue-50 dark:from-purple-950/30 dark:to-blue-950/30 p-4">
+        <div className="flex items-start justify-between gap-4">
+          <div className="flex items-start gap-3 flex-1 min-w-0">
+            <div className="p-2 bg-purple-100 dark:bg-purple-900/50 rounded-lg flex-shrink-0">
+              <Sparkles className="h-5 w-5 text-purple-500" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <h3 className="font-medium">AI Analysis</h3>
+                <span className={cn("px-2 py-0.5 rounded-full text-xs font-medium", getRiskColor(analysis.risk_level))}>
+                  {analysis.risk_level.charAt(0).toUpperCase() + analysis.risk_level.slice(1)} Risk
+                </span>
+              </div>
+              <p className="text-sm text-muted-foreground line-clamp-2">
+                {analysis.summary}
+              </p>
+              <div className="flex items-center gap-3 mt-2 text-xs text-muted-foreground">
+                <span>{totalFindings} finding{totalFindings !== 1 ? "s" : ""}</span>
+                {criticalCount > 0 && (
+                  <span className="text-red-600 dark:text-red-400 flex items-center gap-1">
+                    <AlertTriangle className="h-3 w-3" />
+                    {criticalCount} critical/high
+                  </span>
+                )}
+                <span>~{((analysis.total_token_usage?.total_tokens || 0) / 1000).toFixed(1)}k tokens</span>
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={onRunAnalysis}
+              className="gap-1.5"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+              Re-run
+            </Button>
+            <Button
+              size="sm"
+              onClick={onViewFullAnalysis}
+              className="gap-1.5"
+            >
+              View Details
+              <ChevronDown className="h-3.5 w-3.5 -rotate-90" />
+            </Button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // No analysis yet - show run controls
+  return (
+    <div className="rounded-lg border bg-gradient-to-r from-purple-50 to-blue-50 dark:from-purple-950/30 dark:to-blue-950/30 p-4">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex items-start gap-3 flex-1">
+          <div className="p-2 bg-purple-100 dark:bg-purple-900/50 rounded-lg flex-shrink-0">
+            <Sparkles className="h-5 w-5 text-purple-500" />
+          </div>
+          <div>
+            <h3 className="font-medium mb-1">AI-Powered Analysis</h3>
+            <p className="text-sm text-muted-foreground mb-3">
+              Get risk assessment, code quality analysis, and review priorities.
+            </p>
+
+            {/* Analysis Mode Toggle */}
+            <div className="flex items-center gap-2">
+              <div className="flex border rounded-md overflow-hidden">
+                <button
+                  onClick={() => onSetAnalysisMode("pr_only")}
+                  className={cn(
+                    "px-3 py-1.5 text-xs transition-colors flex items-center gap-1.5",
+                    analysisMode === "pr_only"
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-background hover:bg-muted"
+                  )}
+                >
+                  <FileCode className="h-3.5 w-3.5" />
+                  PR Only
+                </button>
+                <button
+                  onClick={() => hasLinkedRepo && onSetAnalysisMode("with_context")}
+                  disabled={!hasLinkedRepo}
+                  className={cn(
+                    "px-3 py-1.5 text-xs transition-colors flex items-center gap-1.5",
+                    analysisMode === "with_context"
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-background hover:bg-muted",
+                    !hasLinkedRepo && "opacity-50 cursor-not-allowed"
+                  )}
+                  title={hasLinkedRepo ? "Include codebase context" : "Link local repo in Settings"}
+                >
+                  <FolderOpen className="h-3.5 w-3.5" />
+                  With Context
+                </button>
+              </div>
+              {!hasLinkedRepo && (
+                <Link
+                  to="/settings/repositories"
+                  className="text-xs text-muted-foreground hover:text-foreground flex items-center gap-1"
+                >
+                  <Settings className="h-3 w-3" />
+                  Link repo
+                </Link>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <Button onClick={onRunAnalysis} className="gap-2 flex-shrink-0">
+          <Sparkles className="h-4 w-4" />
+          Run Analysis
+        </Button>
+      </div>
+
+      {error && (
+        <div className="mt-3 p-3 bg-red-50 dark:bg-red-950/30 rounded-lg border border-red-200 dark:border-red-800">
+          <p className="text-sm text-red-700 dark:text-red-300">{error}</p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 interface AIAnalyticsPanelProps {
   analysis: OrchestratedAnalysis | null;
   isAnalyzing: boolean;
   error: string | null;
   onRunAnalysis: () => void;
+  linkedRepo: LinkedRepo | null | undefined;
+  analysisMode: "pr_only" | "with_context";
+  onSetAnalysisMode: (mode: "pr_only" | "with_context") => void;
 }
 
-function AIAnalyticsPanel({ analysis, isAnalyzing, error, onRunAnalysis }: AIAnalyticsPanelProps) {
+function AIAnalyticsPanel({ analysis, isAnalyzing, error, onRunAnalysis, linkedRepo, analysisMode, onSetAnalysisMode }: AIAnalyticsPanelProps) {
   const [expandedAgents, setExpandedAgents] = useState<Set<AgentType>>(new Set());
 
   const toggleAgent = (agentType: AgentType) => {
@@ -787,6 +1008,8 @@ function AIAnalyticsPanel({ analysis, isAnalyzing, error, onRunAnalysis }: AIAna
 
   // Show empty state if no analysis
   if (!analysis && !isAnalyzing) {
+    const hasLinkedRepo = linkedRepo && linkedRepo.profile_data;
+
     return (
       <div className="h-full flex flex-col items-center justify-center text-center max-w-md mx-auto">
         <div className="p-4 bg-purple-100 dark:bg-purple-950/50 rounded-full mb-6">
@@ -794,10 +1017,67 @@ function AIAnalyticsPanel({ analysis, isAnalyzing, error, onRunAnalysis }: AIAna
         </div>
 
         <h2 className="text-xl font-semibold mb-2">AI-Powered Analysis</h2>
-        <p className="text-muted-foreground mb-6">
+        <p className="text-muted-foreground mb-4">
           Get intelligent insights about this pull request including risk assessment,
           code quality analysis, and suggested review focus areas.
         </p>
+
+        {/* Analysis Mode Toggle */}
+        <div className="w-full p-4 bg-muted/50 rounded-lg mb-6">
+          <div className="flex items-center justify-center gap-2 mb-3">
+            <span className="text-sm font-medium">Analysis Mode</span>
+          </div>
+          <div className="flex border rounded-lg overflow-hidden">
+            <button
+              onClick={() => onSetAnalysisMode("pr_only")}
+              className={cn(
+                "flex-1 px-4 py-2 text-sm transition-colors flex items-center justify-center gap-2",
+                analysisMode === "pr_only"
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-background hover:bg-muted"
+              )}
+            >
+              <FileCode className="h-4 w-4" />
+              PR Only
+            </button>
+            <button
+              onClick={() => hasLinkedRepo && onSetAnalysisMode("with_context")}
+              disabled={!hasLinkedRepo}
+              className={cn(
+                "flex-1 px-4 py-2 text-sm transition-colors flex items-center justify-center gap-2",
+                analysisMode === "with_context"
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-background hover:bg-muted",
+                !hasLinkedRepo && "opacity-50 cursor-not-allowed"
+              )}
+              title={hasLinkedRepo ? "Analyze with local codebase context" : "Link a local repo in Settings to enable"}
+            >
+              <FolderOpen className="h-4 w-4" />
+              With Context
+            </button>
+          </div>
+          <p className="text-xs text-muted-foreground mt-2">
+            {analysisMode === "pr_only" ? (
+              "Analyze just the changed files in this PR"
+            ) : (
+              "Include patterns and conventions from your local codebase"
+            )}
+          </p>
+          {!hasLinkedRepo && (
+            <div className="mt-3 flex items-center justify-center gap-2 text-xs text-amber-600 dark:text-amber-400">
+              <Settings className="h-3.5 w-3.5" />
+              <Link to="/settings/repositories" className="hover:underline">
+                Link a local repository to enable context mode
+              </Link>
+            </div>
+          )}
+          {linkedRepo && !linkedRepo.profile_data && (
+            <div className="mt-3 flex items-center justify-center gap-2 text-xs text-amber-600 dark:text-amber-400">
+              <AlertTriangle className="h-3.5 w-3.5" />
+              <span>Local repo linked but not analyzed yet. <Link to="/settings/repositories" className="hover:underline">Run analysis in Settings</Link></span>
+            </div>
+          )}
+        </div>
 
         {error && (
           <div className="p-4 bg-red-50 dark:bg-red-950/30 rounded-lg border border-red-200 dark:border-red-800 mb-6">

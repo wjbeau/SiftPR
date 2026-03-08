@@ -1,10 +1,24 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
-import { ChevronRight, GitBranch, User, Loader2 } from "lucide-react";
-import { github, GitHubRepo, GitHubPR } from "@/lib/api";
+import { ChevronRight, GitBranch, User, Loader2, RefreshCw } from "lucide-react";
+import { github } from "@/lib/api";
+import type { GitHubRepo, GitHubPR } from "@/lib/api";
 import { cn, formatDistanceToNow } from "@/lib/utils";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Button } from "@/components/ui/button";
+
+const STORAGE_KEY_PRS_PREFIX = "siftpr-cached-prs-";
+
+// Load cached PRs from localStorage
+function getCachedPRs(owner: string, repo: string): GitHubPR[] | undefined {
+  try {
+    const cached = localStorage.getItem(`${STORAGE_KEY_PRS_PREFIX}${owner}/${repo}`);
+    return cached ? JSON.parse(cached) : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 interface PRPanelProps {
   repo: GitHubRepo | null;
@@ -16,23 +30,48 @@ interface PRNode {
 }
 
 export function PRPanel({ repo }: PRPanelProps) {
-  const { data: prs, isLoading, error } = useQuery({
+  const { data: prs, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: ["repo-prs", repo?.owner.login, repo?.name],
-    queryFn: () => github.getRepoPRs(repo!.owner.login, repo!.name),
+    queryFn: () => {
+      if (!repo) throw new Error("No repo selected");
+      return github.getRepoPRs(repo.owner.login, repo.name);
+    },
     enabled: !!repo,
     staleTime: 1000 * 60 * 2, // 2 minutes
+    placeholderData: repo ? () => getCachedPRs(repo.owner.login, repo.name) : undefined,
   });
+
+  // Cache PRs to localStorage when they change
+  useEffect(() => {
+    if (repo && prs && prs.length > 0) {
+      localStorage.setItem(
+        `${STORAGE_KEY_PRS_PREFIX}${repo.owner.login}/${repo.name}`,
+        JSON.stringify(prs)
+      );
+    }
+  }, [repo, prs]);
 
   // Get PR numbers for checking user reviews
   const prNumbers = useMemo(() => prs?.map((pr) => pr.number) || [], [prs]);
 
-  const { data: reviewedPRNumbers = [], isLoading: isLoadingReviews } = useQuery({
+  const { data: reviewedPRNumbers = [], isLoading: isLoadingReviews, isFetching: isFetchingReviews, refetch: refetchReviews } = useQuery({
     queryKey: ["user-reviewed-prs", repo?.owner.login, repo?.name, prNumbers],
-    queryFn: () =>
-      github.getUserReviewedPRs(repo!.owner.login, repo!.name, prNumbers),
+    queryFn: () => {
+      if (!repo) throw new Error("No repo selected");
+      return github.getUserReviewedPRs(repo.owner.login, repo.name, prNumbers);
+    },
     enabled: !!repo && prNumbers.length > 0,
     staleTime: 1000 * 60 * 2,
   });
+
+  const handleRefresh = () => {
+    refetch();
+    if (prNumbers.length > 0) {
+      refetchReviews();
+    }
+  };
+
+  const isRefreshing = isFetching || isFetchingReviews;
 
   // Split PRs into active reviews and open PRs
   const { activeReviews, openPRs } = useMemo(() => {
@@ -52,7 +91,10 @@ export function PRPanel({ repo }: PRPanelProps) {
     );
   }
 
-  if (isLoading) {
+  // Only show loading state on initial load (no cached data)
+  const showLoading = isLoading && !prs;
+
+  if (showLoading) {
     return (
       <div className="h-full flex flex-col">
         <div className="p-4 border-b">
@@ -87,7 +129,7 @@ export function PRPanel({ repo }: PRPanelProps) {
     );
   }
 
-  if (error) {
+  if (error && !prs) {
     return (
       <div className="p-4">
         <div className="text-sm text-destructive">Failed to load pull requests</div>
@@ -97,19 +139,53 @@ export function PRPanel({ repo }: PRPanelProps) {
 
   if (!prs || prs.length === 0) {
     return (
-      <div className="flex items-center justify-center h-full text-muted-foreground">
-        No open pull requests
+      <div className="h-full flex flex-col">
+        <div className="p-4 border-b flex items-start justify-between">
+          <div>
+            <h2 className="font-semibold">{repo.full_name}</h2>
+            <p className="text-sm text-muted-foreground">
+              {isRefreshing ? "Refreshing..." : "No open pull requests"}
+            </p>
+          </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8 flex-shrink-0"
+            onClick={handleRefresh}
+            disabled={isRefreshing}
+            title="Refresh pull requests"
+          >
+            <RefreshCw className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`} />
+          </Button>
+        </div>
+        {!isRefreshing && (
+          <div className="flex items-center justify-center flex-1 text-muted-foreground">
+            No open pull requests
+          </div>
+        )}
       </div>
     );
   }
 
   return (
     <div className="h-full flex flex-col">
-      <div className="p-4 border-b">
-        <h2 className="font-semibold">{repo.full_name}</h2>
-        <p className="text-sm text-muted-foreground">
-          {prs.length} open pull request{prs.length !== 1 ? "s" : ""}
-        </p>
+      <div className="p-4 border-b flex items-start justify-between">
+        <div>
+          <h2 className="font-semibold">{repo.full_name}</h2>
+          <p className="text-sm text-muted-foreground">
+            {isRefreshing ? "Refreshing..." : `${prs.length} open pull request${prs.length !== 1 ? "s" : ""}`}
+          </p>
+        </div>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 flex-shrink-0"
+          onClick={handleRefresh}
+          disabled={isRefreshing}
+          title="Refresh pull requests"
+        >
+          <RefreshCw className={`h-4 w-4 ${isRefreshing ? "animate-spin" : ""}`} />
+        </Button>
       </div>
 
       <Tabs defaultValue="active" className="flex-1 flex flex-col">
@@ -150,7 +226,7 @@ export function PRPanel({ repo }: PRPanelProps) {
               No PRs where you've reviewed or commented
             </div>
           ) : (
-            <PRList prs={activeReviews} owner={repo!.owner.login} repoName={repo!.name} />
+            <PRList prs={activeReviews} owner={repo.owner.login} repoName={repo.name} />
           )}
         </TabsContent>
 
@@ -166,7 +242,7 @@ export function PRPanel({ repo }: PRPanelProps) {
               All open PRs have your reviews
             </div>
           ) : (
-            <PRList prs={openPRs} owner={repo!.owner.login} repoName={repo!.name} />
+            <PRList prs={openPRs} owner={repo.owner.login} repoName={repo.name} />
           )}
         </TabsContent>
       </Tabs>
@@ -308,6 +384,7 @@ function PRNodeItem({ node, depth, isTreeView, owner, repoName }: PRNodeItemProp
           <div className="flex items-start gap-2">
             {hasChildren && isTreeView ? (
               <button
+                type="button"
                 onClick={toggleExpand}
                 className="mt-0.5 p-0.5 hover:bg-muted rounded transition-colors flex-shrink-0"
               >

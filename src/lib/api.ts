@@ -197,6 +197,8 @@ export const settings = {
     invoke<void>("settings_delete_ai_provider", { settingId }),
   fetchModels: (provider: string, apiKeyOrUrl: string) =>
     invoke<ModelInfo[]>("settings_fetch_models", { provider, apiKeyOrUrl }),
+  fetchModelsForProvider: (provider: string) =>
+    invoke<ModelInfo[]>("settings_fetch_models_for_provider", { provider }),
 };
 
 // GitHub API
@@ -217,7 +219,8 @@ export const github = {
 // AI API
 export const ai = {
   analyzePR: (url: string) => invoke<PRAnalysis>("ai_analyze_pr", { url }),
-  analyzePROrchestrated: (url: string) => invoke<OrchestratedAnalysis>("ai_analyze_pr_orchestrated", { url }),
+  analyzePROrchestrated: (url: string, withCodebaseContext?: boolean) =>
+    invoke<OrchestratedAnalysis>("ai_analyze_pr_orchestrated", { url, withCodebaseContext }),
 };
 
 // Favorites API
@@ -258,4 +261,79 @@ export const review = {
       commitSha,
       viewedFiles,
     }),
+};
+
+// Codebase Profile Types
+export interface DirectoryEntry {
+  name: string;
+  path: string;
+  is_dir: boolean;
+  children: DirectoryEntry[] | null;
+}
+
+export interface ConfigFile {
+  path: string;
+  content: string;
+  file_type: string;
+}
+
+export interface NamingConventions {
+  files: string;
+  functions: string;
+  variables: string;
+  types: string;
+}
+
+export interface CodebasePatterns {
+  naming_conventions: NamingConventions;
+  file_organization: string;
+  common_abstractions: string[];
+  import_style: string;
+  error_handling_pattern: string;
+}
+
+export interface StyleSummary {
+  indentation: string;
+  quote_style: string;
+  trailing_commas: boolean;
+  documentation_style: string;
+  typical_file_length: number;
+}
+
+export interface CodebaseProfile {
+  repo_path: string;
+  last_analyzed_commit: string | null;
+  last_analyzed_at: string | null;
+  directory_tree: DirectoryEntry[];
+  file_count: number;
+  language_breakdown: Record<string, number>;
+  config_files: ConfigFile[];
+  patterns: CodebasePatterns;
+  style_summary: StyleSummary;
+}
+
+export interface LinkedRepo {
+  id: string;
+  user_id: string;
+  repo_full_name: string;
+  local_path: string;
+  last_analyzed_commit: string | null;
+  profile_data: CodebaseProfile | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// Codebase API
+export const codebase = {
+  getLinkedRepos: () => invoke<LinkedRepo[]>("codebase_get_linked_repos"),
+  getLinkedRepo: (repoFullName: string) =>
+    invoke<LinkedRepo | null>("codebase_get_linked_repo", { repoFullName }),
+  linkRepo: (repoFullName: string, localPath: string) =>
+    invoke<LinkedRepo>("codebase_link_repo", { repoFullName, localPath }),
+  unlinkRepo: (repoFullName: string) =>
+    invoke<void>("codebase_unlink_repo", { repoFullName }),
+  analyze: (repoFullName: string) =>
+    invoke<CodebaseProfile>("codebase_analyze", { repoFullName }),
+  getContextSummary: (repoFullName: string) =>
+    invoke<string | null>("codebase_get_context_summary", { repoFullName }),
 };
