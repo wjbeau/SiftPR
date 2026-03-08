@@ -444,6 +444,63 @@ impl GitHubClient {
         let result: CompareResponse = response.json().await?;
         Ok(result.files.unwrap_or_default())
     }
+
+    /// Submit a review on a PR
+    pub async fn submit_review(
+        &self,
+        token: &str,
+        owner: &str,
+        repo: &str,
+        pr_number: i64,
+        event: &str, // APPROVE, REQUEST_CHANGES, or COMMENT
+        body: &str,
+        comments: Vec<ReviewComment>,
+    ) -> AppResult<()> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/pulls/{}/reviews",
+            owner, repo, pr_number
+        );
+
+        let mut json_body = serde_json::json!({
+            "event": event,
+            "body": body
+        });
+
+        // Only include comments if there are any
+        if !comments.is_empty() {
+            json_body["comments"] = serde_json::to_value(&comments)?;
+        }
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Accept", "application/vnd.github.v3+json")
+            .header("User-Agent", "SiftPR")
+            .json(&json_body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_body = response.text().await.unwrap_or_default();
+            return Err(AppError::GitHub(format!(
+                "Failed to submit review: {} - {}",
+                status, error_body
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+/// A review comment to be submitted with a review
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReviewComment {
+    pub path: String,
+    pub line: Option<i64>,
+    pub side: Option<String>, // LEFT or RIGHT
+    pub body: String,
 }
 
 /// Parse a GitHub PR URL into owner, repo, and PR number

@@ -201,6 +201,14 @@ export const settings = {
     invoke<ModelInfo[]>("settings_fetch_models_for_provider", { provider }),
 };
 
+// Review comment to be submitted with a review
+export interface ReviewComment {
+  path: string;
+  line: number | null;
+  side: "LEFT" | "RIGHT" | null;
+  body: string;
+}
+
 // GitHub API
 export const github = {
   getRepos: () => invoke<GitHubRepo[]>("github_get_repos"),
@@ -214,6 +222,15 @@ export const github = {
   getPRFiles: (url: string) => invoke<GitHubFile[]>("github_get_pr_files", { url }),
   compareCommits: (owner: string, repo: string, base: string, head: string) =>
     invoke<GitHubFile[]>("github_compare_commits", { owner, repo, base, head }),
+  submitReview: (
+    owner: string,
+    repo: string,
+    prNumber: number,
+    event: "APPROVE" | "REQUEST_CHANGES" | "COMMENT",
+    body: string,
+    comments: ReviewComment[]
+  ) =>
+    invoke<void>("github_submit_review", { owner, repo, prNumber, event, body, comments }),
 };
 
 // AI API
@@ -221,6 +238,14 @@ export const ai = {
   analyzePR: (url: string) => invoke<PRAnalysis>("ai_analyze_pr", { url }),
   analyzePROrchestrated: (url: string, withCodebaseContext?: boolean) =>
     invoke<OrchestratedAnalysis>("ai_analyze_pr_orchestrated", { url, withCodebaseContext }),
+};
+
+// Analysis Cache API
+export const analysis = {
+  get: (owner: string, repo: string, prNumber: number, headCommit: string) =>
+    invoke<OrchestratedAnalysis | null>("analysis_get", { owner, repo, prNumber, headCommit }),
+  save: (owner: string, repo: string, prNumber: number, headCommit: string, analysis: OrchestratedAnalysis) =>
+    invoke<void>("analysis_save", { owner, repo, prNumber, headCommit, analysis }),
 };
 
 // Favorites API

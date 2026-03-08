@@ -3,7 +3,7 @@ import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import { ArrowLeft, FileCode, Loader2, Sparkles, Calendar, MessageSquare, User, Users, GitPullRequest, RefreshCw, ClipboardList, AlertTriangle, BookOpen, Files, ChevronDown, Check, CheckCircle2, XCircle, MessageCircle, Eye, EyeOff, Plus, Send, Filter, History, Pencil, Trash2, X, Shield, Layers, Paintbrush, Zap, FolderOpen, Settings } from "lucide-react";
-import { github, GitHubFile, GitHubPR, review, ai, OrchestratedAnalysis, FileAnalysis, LineAnnotation, AgentType, codebase, LinkedRepo } from "@/lib/api";
+import { github, GitHubFile, GitHubPR, review, ai, analysis as analysisApi, OrchestratedAnalysis, FileAnalysis, LineAnnotation, AgentType, codebase, LinkedRepo } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn, formatDistanceToNow } from "@/lib/utils";
@@ -115,6 +115,24 @@ export function Review() {
     }
   }, [reviewState?.viewed_files, hasInitializedViewedFiles]);
 
+  // Load saved analysis when PR data is available
+  const [hasLoadedAnalysis, setHasLoadedAnalysis] = useState(false);
+  useEffect(() => {
+    if (pr?.head.sha && owner && repo && prNumberInt && !hasLoadedAnalysis && !analysis) {
+      setHasLoadedAnalysis(true);
+      analysisApi.get(owner, repo, prNumberInt, pr.head.sha)
+        .then((savedAnalysis) => {
+          if (savedAnalysis) {
+            console.log("Loaded saved analysis for commit:", pr.head.sha);
+            setAnalysis(savedAnalysis);
+          }
+        })
+        .catch((err) => {
+          console.error("Failed to load saved analysis:", err);
+        });
+    }
+  }, [pr?.head.sha, owner, repo, prNumberInt, hasLoadedAnalysis, analysis]);
+
   // Determine which files to show based on view mode
   const displayFiles = useMemo(() => {
     if (viewMode === "since_review" && filesSinceReview) {
@@ -127,7 +145,7 @@ export function Review() {
   const hasNewChanges = hasReviewedBefore && pr?.head.sha !== reviewState?.last_reviewed_commit;
 
   const runAnalysis = useCallback(async () => {
-    if (!prUrl) return;
+    if (!prUrl || !owner || !repo || !pr?.head.sha) return;
     setIsAnalyzing(true);
     setAnalysisError(null);
     try {
@@ -136,6 +154,14 @@ export function Review() {
       const result = await ai.analyzePROrchestrated(prUrl, withContext);
       console.log("Analysis result:", result);
       setAnalysis(result);
+
+      // Save analysis to cache
+      try {
+        await analysisApi.save(owner, repo, prNumberInt, pr.head.sha, result);
+        console.log("Analysis saved to cache");
+      } catch (saveErr) {
+        console.error("Failed to save analysis:", saveErr);
+      }
     } catch (e) {
       console.error("Analysis failed:", e);
       // Tauri errors come as strings or objects with message property
@@ -146,7 +172,7 @@ export function Review() {
     } finally {
       setIsAnalyzing(false);
     }
-  }, [prUrl, analysisMode]);
+  }, [prUrl, analysisMode, owner, repo, prNumberInt, pr?.head.sha]);
 
   // Get file analysis for selected file
   const selectedFileAnalysis = useMemo(() => {

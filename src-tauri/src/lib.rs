@@ -407,6 +407,44 @@ fn review_save_state(
 }
 
 #[tauri::command]
+fn analysis_get(
+    owner: String,
+    repo: String,
+    pr_number: i64,
+    head_commit: String,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<Option<OrchestratedAnalysis>> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+
+    if let Some(json) = app.db.get_pr_analysis(&user.id, &owner, &repo, pr_number, &head_commit)? {
+        let analysis: OrchestratedAnalysis = serde_json::from_str(&json)
+            .map_err(|e| AppError::Internal(format!("Failed to parse analysis: {}", e)))?;
+        Ok(Some(analysis))
+    } else {
+        Ok(None)
+    }
+}
+
+#[tauri::command]
+fn analysis_save(
+    owner: String,
+    repo: String,
+    pr_number: i64,
+    head_commit: String,
+    analysis: OrchestratedAnalysis,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<()> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+
+    let json = serde_json::to_string(&analysis)
+        .map_err(|e| AppError::Internal(format!("Failed to serialize analysis: {}", e)))?;
+
+    app.db.save_pr_analysis(&user.id, &owner, &repo, pr_number, &head_commit, &json)
+}
+
+#[tauri::command]
 async fn github_compare_commits(
     owner: String,
     repo: String,
@@ -422,6 +460,26 @@ async fn github_compare_commits(
 
     let client = GitHubClient::new();
     client.compare_commits(&token, &owner, &repo, &base, &head).await
+}
+
+#[tauri::command]
+async fn github_submit_review(
+    owner: String,
+    repo: String,
+    pr_number: i64,
+    event: String, // "APPROVE", "REQUEST_CHANGES", or "COMMENT"
+    body: String,
+    comments: Vec<github::ReviewComment>,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<()> {
+    let token = {
+        let app = state.lock().unwrap();
+        let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+        app.db.get_github_token(&user.id)?
+    };
+
+    let client = GitHubClient::new();
+    client.submit_review(&token, &owner, &repo, pr_number, &event, &body, comments).await
 }
 
 // Linked repos commands
@@ -552,10 +610,13 @@ pub fn run() {
             github_get_pr,
             github_get_pr_files,
             github_compare_commits,
+            github_submit_review,
             ai_analyze_pr,
             ai_analyze_pr_orchestrated,
             review_get_state,
             review_save_state,
+            analysis_get,
+            analysis_save,
             codebase_get_linked_repos,
             codebase_get_linked_repo,
             codebase_link_repo,

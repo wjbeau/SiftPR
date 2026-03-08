@@ -113,6 +113,18 @@ impl Database {
                 updated_at TEXT NOT NULL,
                 UNIQUE(user_id, repo_full_name)
             );
+
+            CREATE TABLE IF NOT EXISTS pr_analyses (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id),
+                repo_owner TEXT NOT NULL,
+                repo_name TEXT NOT NULL,
+                pr_number INTEGER NOT NULL,
+                head_commit TEXT NOT NULL,
+                analysis_data TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(user_id, repo_owner, repo_name, pr_number, head_commit)
+            );
             "#,
         )?;
 
@@ -535,6 +547,53 @@ impl Database {
             "DELETE FROM linked_repos WHERE user_id = ?1 AND repo_full_name = ?2",
             params![user_id, repo_full_name],
         )?;
+        Ok(())
+    }
+
+    // PR Analysis operations
+
+    pub fn get_pr_analysis(
+        &self,
+        user_id: &str,
+        repo_owner: &str,
+        repo_name: &str,
+        pr_number: i64,
+        head_commit: &str,
+    ) -> AppResult<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.query_row(
+            "SELECT analysis_data FROM pr_analyses
+             WHERE user_id = ?1 AND repo_owner = ?2 AND repo_name = ?3 AND pr_number = ?4 AND head_commit = ?5",
+            params![user_id, repo_owner, repo_name, pr_number, head_commit],
+            |row| row.get(0),
+        ).ok();
+
+        Ok(result)
+    }
+
+    pub fn save_pr_analysis(
+        &self,
+        user_id: &str,
+        repo_owner: &str,
+        repo_name: &str,
+        pr_number: i64,
+        head_commit: &str,
+        analysis_data: &str,
+    ) -> AppResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+
+        conn.execute(
+            r#"
+            INSERT INTO pr_analyses (id, user_id, repo_owner, repo_name, pr_number, head_commit, analysis_data, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            ON CONFLICT(user_id, repo_owner, repo_name, pr_number, head_commit) DO UPDATE SET
+                analysis_data = ?7
+            "#,
+            params![id, user_id, repo_owner, repo_name, pr_number, head_commit, analysis_data, now],
+        )?;
+
         Ok(())
     }
 }
