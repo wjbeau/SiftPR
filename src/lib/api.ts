@@ -42,8 +42,8 @@ export interface GitHubPR {
   state: string;
   user: GitHubPRUser;
   assignees: GitHubPRUser[] | null;
-  base: { ref: string };
-  head: { ref: string };
+  base: { ref: string; sha: string };
+  head: { ref: string; sha: string };
   created_at: string;
   updated_at: string;
   draft: boolean | null;
@@ -115,6 +115,8 @@ export const github = {
     invoke<number[]>("github_get_user_reviewed_prs", { owner, repo, prNumbers }),
   getPR: (url: string) => invoke<GitHubPR>("github_get_pr", { url }),
   getPRFiles: (url: string) => invoke<GitHubFile[]>("github_get_pr_files", { url }),
+  compareCommits: (owner: string, repo: string, base: string, head: string) =>
+    invoke<GitHubFile[]>("github_compare_commits", { owner, repo, base, head }),
 };
 
 // AI API
@@ -128,4 +130,36 @@ export const favorites = {
   add: (repoId: number, repoFullName: string) =>
     invoke<void>("favorites_add", { repoId, repoFullName }),
   remove: (repoId: number) => invoke<void>("favorites_remove", { repoId }),
+};
+
+// Review State API
+export interface PRReviewState {
+  id: string;
+  user_id: string;
+  repo_owner: string;
+  repo_name: string;
+  pr_number: number;
+  last_reviewed_commit: string;
+  viewed_files: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export const review = {
+  getState: (owner: string, repo: string, prNumber: number) =>
+    invoke<PRReviewState | null>("review_get_state", { owner, repo, prNumber }),
+  saveState: (
+    owner: string,
+    repo: string,
+    prNumber: number,
+    commitSha: string,
+    viewedFiles: string[]
+  ) =>
+    invoke<PRReviewState>("review_save_state", {
+      owner,
+      repo,
+      prNumber,
+      commitSha,
+      viewedFiles,
+    }),
 };

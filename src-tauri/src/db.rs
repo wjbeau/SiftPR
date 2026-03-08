@@ -88,6 +88,19 @@ impl Database {
                 created_at TEXT NOT NULL,
                 UNIQUE(user_id, repo_id)
             );
+
+            CREATE TABLE IF NOT EXISTS pr_review_state (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id),
+                repo_owner TEXT NOT NULL,
+                repo_name TEXT NOT NULL,
+                pr_number INTEGER NOT NULL,
+                last_reviewed_commit TEXT NOT NULL,
+                viewed_files TEXT NOT NULL DEFAULT '[]',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(user_id, repo_owner, repo_name, pr_number)
+            );
             "#,
         )?;
 
@@ -311,6 +324,81 @@ impl Database {
         )?;
         Ok(())
     }
+
+    // PR Review State operations
+
+    pub fn get_pr_review_state(
+        &self,
+        user_id: &str,
+        repo_owner: &str,
+        repo_name: &str,
+        pr_number: i64,
+    ) -> AppResult<Option<PRReviewState>> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.query_row(
+            "SELECT id, user_id, repo_owner, repo_name, pr_number, last_reviewed_commit, viewed_files, created_at, updated_at
+             FROM pr_review_state
+             WHERE user_id = ?1 AND repo_owner = ?2 AND repo_name = ?3 AND pr_number = ?4",
+            params![user_id, repo_owner, repo_name, pr_number],
+            |row| {
+                let viewed_files_json: String = row.get(6)?;
+                let viewed_files: Vec<String> = serde_json::from_str(&viewed_files_json).unwrap_or_default();
+                Ok(PRReviewState {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    repo_owner: row.get(2)?,
+                    repo_name: row.get(3)?,
+                    pr_number: row.get(4)?,
+                    last_reviewed_commit: row.get(5)?,
+                    viewed_files,
+                    created_at: row.get(7)?,
+                    updated_at: row.get(8)?,
+                })
+            },
+        ).ok();
+
+        Ok(result)
+    }
+
+    pub fn save_pr_review_state(
+        &self,
+        user_id: &str,
+        repo_owner: &str,
+        repo_name: &str,
+        pr_number: i64,
+        commit_sha: &str,
+        viewed_files: &[String],
+    ) -> AppResult<PRReviewState> {
+        let conn = self.conn.lock().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        let viewed_files_json = serde_json::to_string(viewed_files)
+            .map_err(|e| AppError::Internal(format!("Failed to serialize viewed files: {}", e)))?;
+
+        conn.execute(
+            r#"
+            INSERT INTO pr_review_state (id, user_id, repo_owner, repo_name, pr_number, last_reviewed_commit, viewed_files, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
+            ON CONFLICT(user_id, repo_owner, repo_name, pr_number) DO UPDATE SET
+                last_reviewed_commit = ?6,
+                viewed_files = ?7,
+                updated_at = ?8
+            "#,
+            params![id, user_id, repo_owner, repo_name, pr_number, commit_sha, viewed_files_json, now],
+        )?;
+
+        Ok(PRReviewState {
+            id,
+            user_id: user_id.to_string(),
+            repo_owner: repo_owner.to_string(),
+            repo_name: repo_name.to_string(),
+            pr_number,
+            last_reviewed_commit: commit_sha.to_string(),
+            viewed_files: viewed_files.to_vec(),
+            created_at: now.clone(),
+            updated_at: now,
+        })
+    }
 }
 
 fn get_database_path() -> AppResult<PathBuf> {
@@ -335,6 +423,19 @@ pub struct AISettings {
     pub provider: String,
     pub model_preference: String,
     pub is_active: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PRReviewState {
+    pub id: String,
+    pub user_id: String,
+    pub repo_owner: String,
+    pub repo_name: String,
+    pub pr_number: i64,
+    pub last_reviewed_commit: String,
+    pub viewed_files: Vec<String>,
     pub created_at: String,
     pub updated_at: String,
 }

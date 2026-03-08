@@ -64,6 +64,7 @@ pub struct GitHubPRUser {
 pub struct GitHubBranch {
     #[serde(rename = "ref")]
     pub ref_name: String,
+    pub sha: String,
 }
 
 /// Repo with open PR count for dashboard display
@@ -410,6 +411,38 @@ impl GitHubClient {
         }
 
         Ok(response.text().await?)
+    }
+
+    /// Compare two commits and get the files that changed
+    pub async fn compare_commits(&self, token: &str, owner: &str, repo: &str, base: &str, head: &str) -> AppResult<Vec<GitHubFile>> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/compare/{}...{}",
+            owner, repo, base, head
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Accept", "application/vnd.github.v3+json")
+            .header("User-Agent", "SiftPR")
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(AppError::GitHub(format!(
+                "Failed to compare commits: {}",
+                response.status()
+            )));
+        }
+
+        #[derive(Deserialize)]
+        struct CompareResponse {
+            files: Option<Vec<GitHubFile>>,
+        }
+
+        let result: CompareResponse = response.json().await?;
+        Ok(result.files.unwrap_or_default())
     }
 }
 

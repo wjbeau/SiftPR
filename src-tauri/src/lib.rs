@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use tauri::State;
 
 use ai::AIClient;
-use db::{AISettings, Database, User};
+use db::{AISettings, Database, PRReviewState, User};
 use error::{AppError, AppResult};
 use github::{GitHubClient, GitHubFile, GitHubPR, GitHubRepo};
 
@@ -292,6 +292,52 @@ async fn ai_analyze_pr(
     ).await
 }
 
+// Review state commands
+
+#[tauri::command]
+fn review_get_state(
+    owner: String,
+    repo: String,
+    pr_number: i64,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<Option<PRReviewState>> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+    app.db.get_pr_review_state(&user.id, &owner, &repo, pr_number)
+}
+
+#[tauri::command]
+fn review_save_state(
+    owner: String,
+    repo: String,
+    pr_number: i64,
+    commit_sha: String,
+    viewed_files: Vec<String>,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<PRReviewState> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+    app.db.save_pr_review_state(&user.id, &owner, &repo, pr_number, &commit_sha, &viewed_files)
+}
+
+#[tauri::command]
+async fn github_compare_commits(
+    owner: String,
+    repo: String,
+    base: String,
+    head: String,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<Vec<GitHubFile>> {
+    let token = {
+        let app = state.lock().unwrap();
+        let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+        app.db.get_github_token(&user.id)?
+    };
+
+    let client = GitHubClient::new();
+    client.compare_commits(&token, &owner, &repo, &base, &head).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let db = Database::new().expect("Failed to initialize database");
@@ -319,7 +365,10 @@ pub fn run() {
             github_get_user_reviewed_prs,
             github_get_pr,
             github_get_pr_files,
+            github_compare_commits,
             ai_analyze_pr,
+            review_get_state,
+            review_save_state,
         ])
         .setup(|app| {
             #[cfg(desktop)]

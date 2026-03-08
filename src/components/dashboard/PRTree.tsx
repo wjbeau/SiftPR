@@ -1,5 +1,6 @@
 import { useState, useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import { ChevronRight, GitBranch, User } from "lucide-react";
 import { github, GitHubRepo, GitHubPR } from "@/lib/api";
 import { cn, formatDistanceToNow } from "@/lib/utils";
@@ -112,7 +113,7 @@ export function PRPanel({ repo }: PRPanelProps) {
               No PRs where you've reviewed or commented
             </div>
           ) : (
-            <PRList prs={activeReviews} />
+            <PRList prs={activeReviews} owner={repo!.owner.login} repoName={repo!.name} />
           )}
         </TabsContent>
 
@@ -122,7 +123,7 @@ export function PRPanel({ repo }: PRPanelProps) {
               All open PRs have your reviews
             </div>
           ) : (
-            <PRList prs={openPRs} />
+            <PRList prs={openPRs} owner={repo!.owner.login} repoName={repo!.name} />
           )}
         </TabsContent>
       </Tabs>
@@ -135,9 +136,11 @@ export { PRPanel as PRTree };
 
 interface PRListProps {
   prs: GitHubPR[];
+  owner: string;
+  repoName: string;
 }
 
-function PRList({ prs }: PRListProps) {
+function PRList({ prs, owner, repoName }: PRListProps) {
   // Build tree structure from PRs
   const { prTree, hasChains } = useMemo(() => {
     if (prs.length === 0) return { prTree: [], hasChains: false };
@@ -196,6 +199,8 @@ function PRList({ prs }: PRListProps) {
             node={node}
             depth={0}
             isTreeView={hasChains}
+            owner={owner}
+            repoName={repoName}
           />
         ))}
       </ul>
@@ -207,9 +212,11 @@ interface PRNodeItemProps {
   node: PRNode;
   depth: number;
   isTreeView: boolean;
+  owner: string;
+  repoName: string;
 }
 
-function PRNodeItem({ node, depth, isTreeView }: PRNodeItemProps) {
+function PRNodeItem({ node, depth, isTreeView, owner, repoName }: PRNodeItemProps) {
   const { pr } = node;
   const hasChildren = node.children.length > 0;
   const [isExpanded, setIsExpanded] = useState(true);
@@ -223,20 +230,15 @@ function PRNodeItem({ node, depth, isTreeView }: PRNodeItemProps) {
   const assignees = pr.assignees?.filter(Boolean) || [];
 
   return (
-    <li
-      className={cn(depth > 0 && "border-l-4 border-blue-400 dark:border-blue-600")}
-      style={{ marginLeft: depth > 0 ? `${depth * 48}px` : 0 }}
-    >
+    <li className={cn(depth > 0 && "ml-4 pl-3 border-l-2 border-blue-400 dark:border-blue-600")}>
       <div
         className={cn(
           "rounded-md hover:bg-accent transition-colors",
-          depth > 0 && "bg-muted/30 ml-4"
+          depth > 0 && "bg-muted/30"
         )}
       >
-        <a
-          href={pr.html_url}
-          target="_blank"
-          rel="noopener noreferrer"
+        <Link
+          to={`/review/${owner}/${repoName}/${pr.number}`}
           className="block py-3 px-3"
         >
           <div className="flex items-start gap-2">
@@ -344,7 +346,7 @@ function PRNodeItem({ node, depth, isTreeView }: PRNodeItemProps) {
               )}
             </div>
           </div>
-        </a>
+        </Link>
       </div>
       {hasChildren && isExpanded && (
         <ul className="mt-1">
@@ -354,6 +356,8 @@ function PRNodeItem({ node, depth, isTreeView }: PRNodeItemProps) {
               node={child}
               depth={depth + 1}
               isTreeView={isTreeView}
+              owner={owner}
+              repoName={repoName}
             />
           ))}
         </ul>
