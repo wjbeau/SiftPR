@@ -8,8 +8,8 @@ mod github;
 use std::sync::Mutex;
 use tauri::State;
 
-use ai::{AIClient, ModelInfo, OrchestratedAnalysis, Orchestrator};
-use db::{AISettings, CodebaseProfile, Database, LinkedRepo, PRReviewState, User};
+use ai::{AIClient, ModelInfo, OrchestratedAnalysis, Orchestrator, prompts, types::AgentType};
+use db::{AISettings, AgentSettings, CodebaseProfile, Database, LinkedRepo, PRReviewState, User};
 use error::{AppError, AppResult};
 use github::{GitHubClient, GitHubFile, GitHubPR, GitHubRepo};
 
@@ -579,6 +579,152 @@ fn codebase_get_context_summary(
     Ok(None)
 }
 
+#[tauri::command]
+async fn codebase_clone_repo(
+    repo_full_name: String,
+    destination_path: String,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<LinkedRepo> {
+    // Get user and token
+    let (user_id, token) = {
+        let app = state.lock().unwrap();
+        let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+        let token = app.db.get_github_token(&user.id)?;
+        (user.id, token)
+    };
+
+    // Validate destination path exists
+    let dest_path = std::path::Path::new(&destination_path);
+    if !dest_path.exists() {
+        return Err(AppError::Internal(format!(
+            "Destination path does not exist: {}",
+            destination_path
+        )));
+    }
+    if !dest_path.is_dir() {
+        return Err(AppError::Internal(format!(
+            "Destination path is not a directory: {}",
+            destination_path
+        )));
+    }
+
+    // Extract repo name from full name (owner/repo -> repo)
+    let repo_name = repo_full_name
+        .split('/')
+        .last()
+        .ok_or_else(|| AppError::Internal("Invalid repository name".to_string()))?;
+
+    // Full path where repo will be cloned
+    let clone_path = dest_path.join(repo_name);
+    let clone_path_str = clone_path.to_string_lossy().to_string();
+
+    // Check if clone path already exists
+    if clone_path.exists() {
+        return Err(AppError::Internal(format!(
+            "Directory already exists: {}",
+            clone_path_str
+        )));
+    }
+
+    // Build authenticated clone URL
+    let clone_url = format!(
+        "https://x-access-token:{}@github.com/{}.git",
+        token, repo_full_name
+    );
+
+    // Run git clone
+    let output = std::process::Command::new("git")
+        .args(["clone", &clone_url, &clone_path_str])
+        .output()
+        .map_err(|e| AppError::Internal(format!("Failed to run git clone: {}", e)))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // Don't leak the token in error messages
+        let sanitized_error = stderr.replace(&token, "[REDACTED]");
+        return Err(AppError::Internal(format!(
+            "Git clone failed: {}",
+            sanitized_error
+        )));
+    }
+
+    // Link the cloned repository
+    let linked_repo = {
+        let app = state.lock().unwrap();
+        app.db.link_repo(&user_id, &repo_full_name, &clone_path_str)?
+    };
+
+    Ok(linked_repo)
+}
+
+// Agent settings commands
+
+#[tauri::command]
+fn agents_get_settings(
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<Vec<AgentSettings>> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+    app.db.get_agent_settings(&user.id)
+}
+
+#[tauri::command]
+fn agents_save_setting(
+    agent_type: String,
+    model_override: Option<String>,
+    custom_prompt: Option<String>,
+    enabled: bool,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<AgentSettings> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+    app.db.save_agent_setting(
+        &user.id,
+        &agent_type,
+        model_override.as_deref(),
+        custom_prompt.as_deref(),
+        enabled,
+    )
+}
+
+#[derive(serde::Serialize)]
+pub struct AgentInfo {
+    pub agent_type: String,
+    pub name: String,
+    pub description: String,
+    pub default_prompt: String,
+}
+
+#[tauri::command]
+fn agents_get_defaults() -> Vec<AgentInfo> {
+    vec![
+        AgentInfo {
+            agent_type: "security".to_string(),
+            name: "Security Agent".to_string(),
+            description: "Scans for security vulnerabilities, OWASP Top 10, and potential risks".to_string(),
+            default_prompt: prompts::get_system_prompt(AgentType::Security).to_string(),
+        },
+        AgentInfo {
+            agent_type: "architecture".to_string(),
+            name: "Architecture Agent".to_string(),
+            description: "Reviews code structure, SOLID principles, and design patterns".to_string(),
+            default_prompt: prompts::get_system_prompt(AgentType::Architecture).to_string(),
+        },
+        AgentInfo {
+            agent_type: "style".to_string(),
+            name: "Style Agent".to_string(),
+            description: "Checks naming conventions, consistency, and documentation".to_string(),
+            default_prompt: prompts::get_system_prompt(AgentType::Style).to_string(),
+        },
+        AgentInfo {
+            agent_type: "performance".to_string(),
+            name: "Performance Agent".to_string(),
+            description: "Identifies performance issues and optimization opportunities".to_string(),
+            default_prompt: prompts::get_system_prompt(AgentType::Performance).to_string(),
+        },
+    ]
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let db = Database::new().expect("Failed to initialize database");
@@ -623,6 +769,10 @@ pub fn run() {
             codebase_unlink_repo,
             codebase_analyze,
             codebase_get_context_summary,
+            codebase_clone_repo,
+            agents_get_settings,
+            agents_save_setting,
+            agents_get_defaults,
         ])
         .setup(|app| {
             #[cfg(desktop)]

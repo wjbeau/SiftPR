@@ -125,6 +125,18 @@ impl Database {
                 created_at TEXT NOT NULL,
                 UNIQUE(user_id, repo_owner, repo_name, pr_number, head_commit)
             );
+
+            CREATE TABLE IF NOT EXISTS agent_settings (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id),
+                agent_type TEXT NOT NULL,
+                model_override TEXT,
+                custom_prompt TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(user_id, agent_type)
+            );
             "#,
         )?;
 
@@ -596,6 +608,91 @@ impl Database {
 
         Ok(())
     }
+
+    // Agent settings operations
+
+    pub fn get_agent_settings(&self, user_id: &str) -> AppResult<Vec<AgentSettings>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, user_id, agent_type, model_override, custom_prompt, enabled, created_at, updated_at
+             FROM agent_settings WHERE user_id = ?1"
+        )?;
+
+        let settings = stmt.query_map(params![user_id], |row| {
+            Ok(AgentSettings {
+                id: row.get(0)?,
+                user_id: row.get(1)?,
+                agent_type: row.get(2)?,
+                model_override: row.get(3)?,
+                custom_prompt: row.get(4)?,
+                enabled: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+
+        Ok(settings)
+    }
+
+    pub fn get_agent_setting(&self, user_id: &str, agent_type: &str) -> AppResult<Option<AgentSettings>> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.query_row(
+            "SELECT id, user_id, agent_type, model_override, custom_prompt, enabled, created_at, updated_at
+             FROM agent_settings WHERE user_id = ?1 AND agent_type = ?2",
+            params![user_id, agent_type],
+            |row| {
+                Ok(AgentSettings {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    agent_type: row.get(2)?,
+                    model_override: row.get(3)?,
+                    custom_prompt: row.get(4)?,
+                    enabled: row.get(5)?,
+                    created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
+                })
+            },
+        ).ok();
+
+        Ok(result)
+    }
+
+    pub fn save_agent_setting(
+        &self,
+        user_id: &str,
+        agent_type: &str,
+        model_override: Option<&str>,
+        custom_prompt: Option<&str>,
+        enabled: bool,
+    ) -> AppResult<AgentSettings> {
+        let conn = self.conn.lock().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+
+        conn.execute(
+            r#"
+            INSERT INTO agent_settings (id, user_id, agent_type, model_override, custom_prompt, enabled, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+            ON CONFLICT(user_id, agent_type) DO UPDATE SET
+                model_override = ?4,
+                custom_prompt = ?5,
+                enabled = ?6,
+                updated_at = ?7
+            "#,
+            params![id, user_id, agent_type, model_override, custom_prompt, enabled, now],
+        )?;
+
+        Ok(AgentSettings {
+            id,
+            user_id: user_id.to_string(),
+            agent_type: agent_type.to_string(),
+            model_override: model_override.map(|s| s.to_string()),
+            custom_prompt: custom_prompt.map(|s| s.to_string()),
+            enabled,
+            created_at: now.clone(),
+            updated_at: now,
+        })
+    }
 }
 
 fn get_database_path() -> AppResult<PathBuf> {
@@ -681,4 +778,16 @@ pub struct StyleSummary {
     pub trailing_commas: bool,
     pub documentation_style: String,
     pub typical_file_length: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentSettings {
+    pub id: String,
+    pub user_id: String,
+    pub agent_type: String,
+    pub model_override: Option<String>,
+    pub custom_prompt: Option<String>,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
 }

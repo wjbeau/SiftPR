@@ -79,9 +79,24 @@ export function Repositories() {
     },
   });
 
+  const cloneRepoMutation = useMutation({
+    mutationFn: (data: { repoFullName: string; destinationPath: string }) =>
+      codebase.cloneRepo(data.repoFullName, data.destinationPath),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["codebase", "linked"] });
+      setCloneRepoName("");
+      setCloneDestPath("");
+    },
+  });
+
   const handleLinkRepo = (e: React.FormEvent) => {
     e.preventDefault();
     linkRepoMutation.mutate({ repoFullName: linkRepoName, localPath: linkLocalPath });
+  };
+
+  const handleCloneRepo = (e: React.FormEvent) => {
+    e.preventDefault();
+    cloneRepoMutation.mutate({ repoFullName: cloneRepoName, destinationPath: cloneDestPath });
   };
 
   const handleBrowseFolder = async (setPath: (path: string) => void) => {
@@ -326,7 +341,7 @@ export function Repositories() {
             </TabsContent>
 
             <TabsContent value="clone">
-              <div className="space-y-4">
+              <form onSubmit={handleCloneRepo} className="space-y-4">
                 <div className="space-y-2">
                   <Label htmlFor="clone-repo-name">GitHub Repository</Label>
                   {availableReposToLink && availableReposToLink.length > 0 ? (
@@ -335,6 +350,7 @@ export function Repositories() {
                       className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
                       value={cloneRepoName}
                       onChange={(e) => setCloneRepoName(e.target.value)}
+                      required
                     >
                       <option value="">-- Select a repository --</option>
                       {availableReposToLink.map((repo) => (
@@ -350,6 +366,7 @@ export function Repositories() {
                       placeholder="owner/repo"
                       value={cloneRepoName}
                       onChange={(e) => setCloneRepoName(e.target.value)}
+                      required
                     />
                   )}
                 </div>
@@ -364,6 +381,7 @@ export function Repositories() {
                       value={cloneDestPath}
                       onChange={(e) => setCloneDestPath(e.target.value)}
                       className="flex-1"
+                      required
                     />
                     <Button
                       type="button"
@@ -380,16 +398,28 @@ export function Repositories() {
                 </div>
 
                 <Button
-                  disabled={true} // Clone functionality to be implemented
-                  className="opacity-50"
+                  type="submit"
+                  disabled={cloneRepoMutation.isPending || !cloneRepoName || !cloneDestPath}
                 >
-                  <Download className="h-4 w-4 mr-2" />
-                  Clone Repository
+                  {cloneRepoMutation.isPending ? (
+                    <>
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                      Cloning...
+                    </>
+                  ) : (
+                    <>
+                      <Download className="h-4 w-4 mr-2" />
+                      Clone Repository
+                    </>
+                  )}
                 </Button>
-                <p className="text-xs text-muted-foreground">
-                  Clone functionality coming soon. For now, clone manually and use "Link Existing".
-                </p>
-              </div>
+
+                {cloneRepoMutation.isError && (
+                  <p className="text-sm text-destructive">
+                    {(cloneRepoMutation.error as Error).message}
+                  </p>
+                )}
+              </form>
             </TabsContent>
           </Tabs>
         </CardContent>

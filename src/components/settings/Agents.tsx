@@ -1,3 +1,8 @@
+import { useState, useEffect } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { agents, settings, AgentInfo, AgentSettings } from "@/lib/api";
+import { Button } from "@/components/ui/button";
+import { Label } from "@/components/ui/label";
 import {
   Card,
   CardContent,
@@ -5,55 +10,352 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Bot, Wrench, Shield, FileSearch, AlertTriangle, Lightbulb } from "lucide-react";
+import {
+  Bot,
+  Shield,
+  Layers,
+  Paintbrush,
+  Zap,
+  ChevronDown,
+  RotateCcw,
+  Loader2,
+  Check,
+  AlertCircle,
+} from "lucide-react";
+import { cn } from "@/lib/utils";
 
-const agents = [
-  {
-    name: "Security Agent",
-    description: "Scans for security vulnerabilities and potential risks",
+const AGENT_ICONS: Record<string, { icon: typeof Shield; color: string; bgColor: string }> = {
+  security: {
     icon: Shield,
     color: "text-red-500",
     bgColor: "bg-red-100 dark:bg-red-950",
   },
-  {
-    name: "Architecture Agent",
-    description: "Reviews code structure and architectural patterns",
-    icon: Wrench,
+  architecture: {
+    icon: Layers,
     color: "text-blue-500",
     bgColor: "bg-blue-100 dark:bg-blue-950",
   },
-  {
-    name: "Logic Agent",
-    description: "Analyzes business logic and potential bugs",
-    icon: AlertTriangle,
-    color: "text-amber-500",
-    bgColor: "bg-amber-100 dark:bg-amber-950",
-  },
-  {
-    name: "Documentation Agent",
-    description: "Checks documentation and code comments",
-    icon: FileSearch,
+  style: {
+    icon: Paintbrush,
     color: "text-green-500",
     bgColor: "bg-green-100 dark:bg-green-950",
   },
-  {
-    name: "Suggestions Agent",
-    description: "Provides improvement suggestions and best practices",
-    icon: Lightbulb,
-    color: "text-purple-500",
-    bgColor: "bg-purple-100 dark:bg-purple-950",
+  performance: {
+    icon: Zap,
+    color: "text-amber-500",
+    bgColor: "bg-amber-100 dark:bg-amber-950",
   },
-];
+};
+
+interface AgentCardProps {
+  agent: AgentInfo;
+  settings: AgentSettings | undefined;
+  availableModels: { id: string; name: string }[];
+  onSave: (
+    agentType: string,
+    modelOverride: string | null,
+    customPrompt: string | null,
+    enabled: boolean
+  ) => Promise<void>;
+  isSaving: boolean;
+}
+
+function AgentCard({ agent, settings, availableModels, onSave, isSaving }: AgentCardProps) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [enabled, setEnabled] = useState(settings?.enabled ?? true);
+  const [modelOverride, setModelOverride] = useState(settings?.model_override ?? "");
+  const [customPrompt, setCustomPrompt] = useState(settings?.custom_prompt ?? "");
+  const [hasChanges, setHasChanges] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+
+  const iconConfig = AGENT_ICONS[agent.agent_type] || AGENT_ICONS.security;
+  const Icon = iconConfig.icon;
+
+  // Track changes
+  useEffect(() => {
+    const originalEnabled = settings?.enabled ?? true;
+    const originalModel = settings?.model_override ?? "";
+    const originalPrompt = settings?.custom_prompt ?? "";
+
+    const changed =
+      enabled !== originalEnabled ||
+      modelOverride !== originalModel ||
+      customPrompt !== originalPrompt;
+
+    setHasChanges(changed);
+  }, [enabled, modelOverride, customPrompt, settings]);
+
+  const handleSave = async () => {
+    await onSave(
+      agent.agent_type,
+      modelOverride || null,
+      customPrompt || null,
+      enabled
+    );
+    setHasChanges(false);
+    setSaveSuccess(true);
+    setTimeout(() => setSaveSuccess(false), 2000);
+  };
+
+  const handleResetPrompt = () => {
+    setCustomPrompt("");
+  };
+
+  const displayPrompt = customPrompt || agent.default_prompt;
+  const isUsingCustomPrompt = customPrompt && customPrompt !== agent.default_prompt;
+
+  return (
+    <div className="border rounded-lg">
+      <button
+        onClick={() => setIsOpen(!isOpen)}
+        className="w-full p-4 flex items-center gap-4 hover:bg-muted/50 transition-colors"
+      >
+        <div className={cn("p-2 rounded-lg", iconConfig.bgColor)}>
+          <Icon className={cn("h-5 w-5", iconConfig.color)} />
+        </div>
+        <div className="flex-1 text-left">
+          <div className="font-medium flex items-center gap-2 flex-wrap">
+            {agent.name}
+            {!enabled && (
+              <span className="text-xs bg-muted px-2 py-0.5 rounded text-muted-foreground">
+                Disabled
+              </span>
+            )}
+            {isUsingCustomPrompt && (
+              <span className="text-xs bg-blue-100 dark:bg-blue-900 px-2 py-0.5 rounded text-blue-700 dark:text-blue-300">
+                Custom Prompt
+              </span>
+            )}
+            {modelOverride && (
+              <span className="text-xs bg-purple-100 dark:bg-purple-900 px-2 py-0.5 rounded text-purple-700 dark:text-purple-300">
+                {modelOverride}
+              </span>
+            )}
+          </div>
+          <div className="text-sm text-muted-foreground">{agent.description}</div>
+        </div>
+        <ChevronDown
+          className={cn(
+            "h-5 w-5 text-muted-foreground transition-transform",
+            isOpen && "rotate-180"
+          )}
+        />
+      </button>
+
+      {isOpen && (
+        <div className="px-4 pb-4 pt-2 border-t space-y-4">
+          {/* Enable/Disable Toggle */}
+          <div className="flex items-center justify-between">
+            <div>
+              <Label htmlFor={`${agent.agent_type}-enabled`}>Enable Agent</Label>
+              <p className="text-xs text-muted-foreground">
+                Disabled agents won't run during PR analysis
+              </p>
+            </div>
+            <button
+              id={`${agent.agent_type}-enabled`}
+              onClick={() => setEnabled(!enabled)}
+              className={cn(
+                "relative inline-flex h-6 w-11 items-center rounded-full transition-colors",
+                enabled ? "bg-primary" : "bg-muted"
+              )}
+            >
+              <span
+                className={cn(
+                  "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
+                  enabled ? "translate-x-6" : "translate-x-1"
+                )}
+              />
+            </button>
+          </div>
+
+          {/* Model Override */}
+          <div className="space-y-2">
+            <Label htmlFor={`${agent.agent_type}-model`}>Model Override</Label>
+            <select
+              id={`${agent.agent_type}-model`}
+              className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+              value={modelOverride}
+              onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setModelOverride(e.target.value)}
+            >
+              <option value="">Use default model</option>
+              {availableModels.map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.name}
+                </option>
+              ))}
+            </select>
+            <p className="text-xs text-muted-foreground">
+              Override the default model for this agent, or leave blank to use your active provider's model
+            </p>
+          </div>
+
+          {/* Custom Prompt */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label htmlFor={`${agent.agent_type}-prompt`}>System Prompt</Label>
+              {isUsingCustomPrompt && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleResetPrompt}
+                  className="h-7 text-xs gap-1"
+                >
+                  <RotateCcw className="h-3 w-3" />
+                  Reset to Default
+                </Button>
+              )}
+            </div>
+            <textarea
+              id={`${agent.agent_type}-prompt`}
+              value={displayPrompt}
+              onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setCustomPrompt(e.target.value)}
+              className="flex min-h-[200px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+              placeholder="Enter custom system prompt..."
+            />
+            <p className="text-xs text-muted-foreground">
+              {isUsingCustomPrompt
+                ? "Using custom prompt. Click 'Reset to Default' to restore the original."
+                : "Showing default prompt. Edit to customize this agent's behavior."}
+            </p>
+          </div>
+
+          {/* Save Button */}
+          <div className="flex items-center justify-end gap-2">
+            {saveSuccess && (
+              <span className="text-sm text-green-600 dark:text-green-400 flex items-center gap-1">
+                <Check className="h-4 w-4" />
+                Saved
+              </span>
+            )}
+            <Button
+              onClick={handleSave}
+              disabled={!hasChanges || isSaving}
+              className="gap-2"
+            >
+              {isSaving ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Saving...
+                </>
+              ) : (
+                "Save Changes"
+              )}
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function Agents() {
+  const queryClient = useQueryClient();
+  const [savingAgent, setSavingAgent] = useState<string | null>(null);
+
+  // Fetch default agent info
+  const { data: agentDefaults, isLoading: loadingDefaults } = useQuery({
+    queryKey: ["agents", "defaults"],
+    queryFn: () => agents.getDefaults(),
+  });
+
+  // Fetch user's agent settings
+  const { data: agentSettings, isLoading: loadingSettings } = useQuery({
+    queryKey: ["agents", "settings"],
+    queryFn: () => agents.getSettings(),
+  });
+
+  // Fetch available models from active provider
+  const { data: availableModels } = useQuery({
+    queryKey: ["agents", "models"],
+    queryFn: async () => {
+      try {
+        // Get the active provider and fetch its models
+        const providers = await settings.getAIProviders();
+        const activeProvider = providers.find((p) => p.is_active);
+        if (activeProvider) {
+          const models = await settings.fetchModelsForProvider(activeProvider.provider);
+          return models.map((m) => ({ id: m.id, name: m.name }));
+        }
+        return [];
+      } catch {
+        return [];
+      }
+    },
+  });
+
+  const saveMutation = useMutation({
+    mutationFn: async (data: {
+      agentType: string;
+      modelOverride: string | null;
+      customPrompt: string | null;
+      enabled: boolean;
+    }) => {
+      return agents.saveSetting(
+        data.agentType,
+        data.modelOverride,
+        data.customPrompt,
+        data.enabled
+      );
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["agents", "settings"] });
+    },
+  });
+
+  const handleSave = async (
+    agentType: string,
+    modelOverride: string | null,
+    customPrompt: string | null,
+    enabled: boolean
+  ) => {
+    setSavingAgent(agentType);
+    try {
+      await saveMutation.mutateAsync({ agentType, modelOverride, customPrompt, enabled });
+    } finally {
+      setSavingAgent(null);
+    }
+  };
+
+  const isLoading = loadingDefaults || loadingSettings;
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center py-12">
+        <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  const getSettingsForAgent = (agentType: string) =>
+    agentSettings?.find((s) => s.agent_type === agentType);
+
   return (
     <div className="space-y-6 max-w-2xl">
       <div>
         <h2 className="text-2xl font-bold">AI Agents</h2>
         <p className="text-muted-foreground">
-          Customize the AI agents used in PR analysis orchestration.
+          Customize the AI agents used in PR analysis. Each agent specializes in a different aspect of code review.
         </p>
       </div>
+
+      {!availableModels?.length && (
+        <Card className="border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/20">
+          <CardContent className="pt-4">
+            <div className="flex gap-3">
+              <AlertCircle className="h-5 w-5 text-amber-600 dark:text-amber-500 flex-shrink-0 mt-0.5" />
+              <div className="text-sm">
+                <p className="font-medium text-amber-800 dark:text-amber-200">
+                  No AI Provider Configured
+                </p>
+                <p className="text-amber-700 dark:text-amber-300 mt-1">
+                  Add an AI provider in the Providers tab to customize agent models.
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>
@@ -62,45 +364,20 @@ export function Agents() {
             Agent Configuration
           </CardTitle>
           <CardDescription>
-            Each agent specializes in a different aspect of code review.
-            Agent customization coming soon.
+            Configure model selection, enable/disable agents, and customize system prompts.
           </CardDescription>
         </CardHeader>
-        <CardContent>
-          <div className="space-y-3">
-            {agents.map((agent) => (
-              <div
-                key={agent.name}
-                className="flex items-center gap-4 p-4 border rounded-lg opacity-75"
-              >
-                <div className={`p-2 rounded-lg ${agent.bgColor}`}>
-                  <agent.icon className={`h-5 w-5 ${agent.color}`} />
-                </div>
-                <div className="flex-1">
-                  <div className="font-medium">{agent.name}</div>
-                  <div className="text-sm text-muted-foreground">
-                    {agent.description}
-                  </div>
-                </div>
-                <span className="text-xs bg-muted px-2 py-1 rounded">
-                  Coming Soon
-                </span>
-              </div>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card className="border-dashed">
-        <CardContent className="pt-6">
-          <div className="text-center text-muted-foreground">
-            <Bot className="h-12 w-12 mx-auto mb-4 opacity-50" />
-            <p className="font-medium">Agent Customization Coming Soon</p>
-            <p className="text-sm mt-2">
-              You'll be able to customize prompts, enable/disable agents,
-              and configure agent-specific settings.
-            </p>
-          </div>
+        <CardContent className="space-y-3">
+          {agentDefaults?.map((agent) => (
+            <AgentCard
+              key={agent.agent_type}
+              agent={agent}
+              settings={getSettingsForAgent(agent.agent_type)}
+              availableModels={availableModels || []}
+              onSave={handleSave}
+              isSaving={savingAgent === agent.agent_type}
+            />
+          ))}
         </CardContent>
       </Card>
     </div>

@@ -361,4 +361,43 @@ export const codebase = {
     invoke<CodebaseProfile>("codebase_analyze", { repoFullName }),
   getContextSummary: (repoFullName: string) =>
     invoke<string | null>("codebase_get_context_summary", { repoFullName }),
+  cloneRepo: (repoFullName: string, destinationPath: string) =>
+    invoke<LinkedRepo>("codebase_clone_repo", { repoFullName, destinationPath }),
+};
+
+// Agent Settings Types
+export interface AgentSettings {
+  id: string;
+  user_id: string;
+  agent_type: string;
+  model_override: string | null;
+  custom_prompt: string | null;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentInfo {
+  agent_type: string;
+  name: string;
+  description: string;
+  default_prompt: string;
+}
+
+// Agents API
+export const agents = {
+  getSettings: () => invoke<AgentSettings[]>("agents_get_settings"),
+  saveSetting: (
+    agentType: string,
+    modelOverride: string | null,
+    customPrompt: string | null,
+    enabled: boolean
+  ) =>
+    invoke<AgentSettings>("agents_save_setting", {
+      agentType,
+      modelOverride,
+      customPrompt,
+      enabled,
+    }),
+  getDefaults: () => invoke<AgentInfo[]>("agents_get_defaults"),
 };
