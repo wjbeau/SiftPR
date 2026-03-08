@@ -21,6 +21,7 @@ AI-powered desktop PR review tool that helps you identify important changes and 
 ## Quick Start
 
 1. **Install dependencies**
+
    ```bash
    pnpm install
    ```
@@ -31,6 +32,7 @@ AI-powered desktop PR review tool that helps you identify important changes and 
    - Update credentials in `src-tauri/src/github.rs`
 
 3. **Start development**
+
    ```bash
    pnpm tauri:dev
    ```
@@ -92,6 +94,7 @@ pnpm tauri:build
 ```
 
 This creates platform-specific installers:
+
 - **macOS**: `.dmg` and `.app`
 - **Windows**: `.msi` and `.exe`
 - **Linux**: `.deb`, `.AppImage`, `.rpm`
@@ -107,3 +110,12 @@ Output: `src-tauri/target/release/bundle/`
 ## License
 
 MIT
+
+## TODO
+
+The following feature ideas need implementation:
+
+- Fast navigation in the PR diffs (e.g. jump to next finding)
+- Ability to expand diff to show additional context around diffed lines
+- Improved agent performance (consider RLM, tools, MCP integration, and scope it to the local repo etc)
+- Pre-ingest repo code into vector db and provide as embedding and check what current repo analysis does

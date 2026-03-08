@@ -260,9 +260,9 @@ export function Review() {
     return (
       <div className="p-8">
         <p className="text-destructive">Failed to load pull request</p>
-        <Button asChild variant="outline" className="mt-4">
-          <Link to="/">Back to Dashboard</Link>
-        </Button>
+        <p className="text-sm text-muted-foreground mt-2">
+          Close this tab to return to the dashboard.
+        </p>
       </div>
     );
   }
@@ -271,12 +271,6 @@ export function Review() {
     <div className="h-[calc(100vh-4rem)] flex flex-col -mx-8 -my-8">
       {/* Header */}
       <div className="border-b px-4 py-3 flex items-center gap-4 flex-shrink-0">
-        <Button asChild variant="ghost" size="sm">
-          <Link to="/">
-            <ArrowLeft className="h-4 w-4 mr-1" />
-            Back
-          </Link>
-        </Button>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
             <span className="text-muted-foreground">#{prNumber}</span>
