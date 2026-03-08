@@ -4,7 +4,7 @@ use crate::error::{AppError, AppResult};
 
 // GitHub OAuth configuration
 // In production, these should be loaded from a config file or environment
-const GITHUB_CLIENT_ID: &str = "Iv23liC6bORxIX5AC6u1";
+const GITHUB_CLIENT_ID: &str = "Iv23liC6bORxIX5AC6u1H";
 const GITHUB_CLIENT_SECRET: &str = "e05ae92c595715c3c3660f19699abcea53158219";
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -14,28 +14,63 @@ pub struct GitHubUser {
     pub avatar_url: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitHubRepo {
+    pub id: i64,
+    pub name: String,
+    pub full_name: String,
+    pub owner: GitHubRepoOwner,
+    pub private: bool,
+    pub html_url: String,
+    pub description: Option<String>,
+    pub open_issues_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitHubRepoOwner {
+    pub login: String,
+    pub avatar_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitHubPR {
     pub number: i64,
     pub title: String,
     pub body: Option<String>,
     pub state: String,
     pub user: GitHubPRUser,
+    pub assignees: Option<Vec<GitHubPRUser>>,
     pub base: GitHubBranch,
     pub head: GitHubBranch,
     pub created_at: String,
     pub updated_at: String,
+    pub draft: Option<bool>,
+    pub mergeable_state: Option<String>,
+    pub additions: Option<i64>,
+    pub deletions: Option<i64>,
+    pub changed_files: Option<i64>,
+    pub comments: Option<i64>,
+    pub review_comments: Option<i64>,
+    pub html_url: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitHubPRUser {
     pub login: String,
+    pub avatar_url: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GitHubBranch {
     #[serde(rename = "ref")]
     pub ref_name: String,
+}
+
+/// Repo with open PR count for dashboard display
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepoWithPRCount {
+    pub repo: GitHubRepo,
+    pub open_pr_count: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -99,7 +134,7 @@ impl GitHubClient {
             .get("https://api.github.com/user")
             .header("Authorization", format!("Bearer {}", token))
             .header("Accept", "application/vnd.github.v3+json")
-            .header("User-Agent", "ReviewBoss")
+            .header("User-Agent", "SiftPR")
             .send()
             .await?;
 
@@ -111,6 +146,108 @@ impl GitHubClient {
         }
 
         Ok(response.json().await?)
+    }
+
+    /// Get repositories the user has access to
+    pub async fn get_repos(&self, token: &str) -> AppResult<Vec<GitHubRepo>> {
+        let mut all_repos = Vec::new();
+        let mut page = 1;
+
+        loop {
+            let url = format!(
+                "https://api.github.com/user/repos?per_page=100&page={}&sort=pushed&direction=desc",
+                page
+            );
+
+            let response = self
+                .client
+                .get(&url)
+                .header("Authorization", format!("Bearer {}", token))
+                .header("Accept", "application/vnd.github.v3+json")
+                .header("User-Agent", "SiftPR")
+                .send()
+                .await?;
+
+            if !response.status().is_success() {
+                return Err(AppError::GitHub(format!(
+                    "Failed to get repos: {}",
+                    response.status()
+                )));
+            }
+
+            let repos: Vec<GitHubRepo> = response.json().await?;
+            if repos.is_empty() {
+                break;
+            }
+            all_repos.extend(repos);
+            page += 1;
+
+            // Safety limit
+            if page > 10 {
+                break;
+            }
+        }
+
+        Ok(all_repos)
+    }
+
+    /// Get open pull requests for a repository
+    pub async fn get_repo_prs(&self, token: &str, owner: &str, repo: &str) -> AppResult<Vec<GitHubPR>> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/pulls?state=open&per_page=100",
+            owner, repo
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Accept", "application/vnd.github.v3+json")
+            .header("User-Agent", "SiftPR")
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(AppError::GitHub(format!(
+                "Failed to get PRs: {}",
+                response.status()
+            )));
+        }
+
+        Ok(response.json().await?)
+    }
+
+    /// Get open PR count for a repository
+    pub async fn get_repo_pr_count(&self, token: &str, owner: &str, repo: &str) -> AppResult<i64> {
+        // Use search API to get count efficiently
+        let url = format!(
+            "https://api.github.com/search/issues?q=repo:{}/{}+type:pr+state:open&per_page=1",
+            owner, repo
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Accept", "application/vnd.github.v3+json")
+            .header("User-Agent", "SiftPR")
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(AppError::GitHub(format!(
+                "Failed to get PR count: {}",
+                response.status()
+            )));
+        }
+
+        #[derive(Deserialize)]
+        struct SearchResult {
+            total_count: i64,
+        }
+
+        let result: SearchResult = response.json().await?;
+        Ok(result.total_count)
     }
 
     /// Get pull request details
@@ -125,7 +262,7 @@ impl GitHubClient {
             .get(&url)
             .header("Authorization", format!("Bearer {}", token))
             .header("Accept", "application/vnd.github.v3+json")
-            .header("User-Agent", "ReviewBoss")
+            .header("User-Agent", "SiftPR")
             .send()
             .await?;
 
@@ -151,7 +288,7 @@ impl GitHubClient {
             .get(&url)
             .header("Authorization", format!("Bearer {}", token))
             .header("Accept", "application/vnd.github.v3+json")
-            .header("User-Agent", "ReviewBoss")
+            .header("User-Agent", "SiftPR")
             .send()
             .await?;
 
@@ -177,7 +314,7 @@ impl GitHubClient {
             .get(&url)
             .header("Authorization", format!("Bearer {}", token))
             .header("Accept", "application/vnd.github.raw+json")
-            .header("User-Agent", "ReviewBoss")
+            .header("User-Agent", "SiftPR")
             .send()
             .await?;
 

@@ -24,8 +24,8 @@ export function Layout() {
       <header className="border-b">
         <div className="container flex h-16 items-center justify-between">
           <div className="flex items-center gap-6">
-            <Link to="/" className="text-xl font-bold">
-              SiftPR
+            <Link to="/" className="flex items-center">
+              <img src="/logo.png" alt="SiftPR" className="h-10" />
             </Link>
             <nav className="flex items-center gap-4">
               <Link

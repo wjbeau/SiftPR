@@ -19,16 +19,41 @@ export interface AISettings {
   updated_at: string;
 }
 
+export interface GitHubRepo {
+  id: number;
+  name: string;
+  full_name: string;
+  owner: { login: string; avatar_url: string };
+  private: boolean;
+  html_url: string;
+  description: string | null;
+  open_issues_count: number;
+}
+
+export interface GitHubPRUser {
+  login: string;
+  avatar_url: string | null;
+}
+
 export interface GitHubPR {
   number: number;
   title: string;
   body: string | null;
   state: string;
-  user: { login: string };
-  base: { ref_name: string };
-  head: { ref_name: string };
+  user: GitHubPRUser;
+  assignees: GitHubPRUser[] | null;
+  base: { ref: string };
+  head: { ref: string };
   created_at: string;
   updated_at: string;
+  draft: boolean | null;
+  mergeable_state: string | null;
+  additions: number | null;
+  deletions: number | null;
+  changed_files: number | null;
+  comments: number | null;
+  review_comments: number | null;
+  html_url: string;
 }
 
 export interface GitHubFile {
@@ -81,6 +106,11 @@ export const settings = {
 
 // GitHub API
 export const github = {
+  getRepos: () => invoke<GitHubRepo[]>("github_get_repos"),
+  getRepoPRs: (owner: string, repo: string) =>
+    invoke<GitHubPR[]>("github_get_repo_prs", { owner, repo }),
+  getRepoPRCount: (owner: string, repo: string) =>
+    invoke<number>("github_get_repo_pr_count", { owner, repo }),
   getPR: (url: string) => invoke<GitHubPR>("github_get_pr", { url }),
   getPRFiles: (url: string) => invoke<GitHubFile[]>("github_get_pr_files", { url }),
 };
@@ -88,4 +118,12 @@ export const github = {
 // AI API
 export const ai = {
   analyzePR: (url: string) => invoke<PRAnalysis>("ai_analyze_pr", { url }),
+};
+
+// Favorites API
+export const favorites = {
+  get: () => invoke<number[]>("favorites_get"),
+  add: (repoId: number, repoFullName: string) =>
+    invoke<void>("favorites_add", { repoId, repoFullName }),
+  remove: (repoId: number) => invoke<void>("favorites_remove", { repoId }),
 };

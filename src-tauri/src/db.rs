@@ -79,6 +79,15 @@ impl Database {
                 updated_at TEXT NOT NULL,
                 UNIQUE(user_id, provider)
             );
+
+            CREATE TABLE IF NOT EXISTS favorite_repos (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id),
+                repo_id INTEGER NOT NULL,
+                repo_full_name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(user_id, repo_id)
+            );
             "#,
         )?;
 
@@ -147,6 +156,7 @@ impl Database {
 
     pub fn delete_user(&self, user_id: &str) -> AppResult<()> {
         let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM favorite_repos WHERE user_id = ?1", params![user_id])?;
         conn.execute("DELETE FROM user_ai_settings WHERE user_id = ?1", params![user_id])?;
         conn.execute("DELETE FROM review_comments WHERE review_id IN (SELECT id FROM reviews WHERE user_id = ?1)", params![user_id])?;
         conn.execute("DELETE FROM reviews WHERE user_id = ?1", params![user_id])?;
@@ -261,12 +271,52 @@ impl Database {
             Ok(None)
         }
     }
+
+    // Favorite repos operations
+
+    pub fn get_favorite_repos(&self, user_id: &str) -> AppResult<Vec<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT repo_id FROM favorite_repos WHERE user_id = ?1"
+        )?;
+
+        let repo_ids = stmt.query_map(params![user_id], |row| {
+            row.get(0)
+        })?.collect::<Result<Vec<i64>, _>>()?;
+
+        Ok(repo_ids)
+    }
+
+    pub fn add_favorite_repo(&self, user_id: &str, repo_id: i64, repo_full_name: &str) -> AppResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+
+        conn.execute(
+            r#"
+            INSERT OR IGNORE INTO favorite_repos (id, user_id, repo_id, repo_full_name, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5)
+            "#,
+            params![id, user_id, repo_id, repo_full_name, now],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn remove_favorite_repo(&self, user_id: &str, repo_id: i64) -> AppResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM favorite_repos WHERE user_id = ?1 AND repo_id = ?2",
+            params![user_id, repo_id],
+        )?;
+        Ok(())
+    }
 }
 
 fn get_database_path() -> AppResult<PathBuf> {
     let data_dir = dirs::data_dir()
         .ok_or_else(|| AppError::Internal("Could not find data directory".to_string()))?;
-    Ok(data_dir.join("ReviewBoss").join("reviewboss.db"))
+    Ok(data_dir.join("SiftPR").join("siftpr.db"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

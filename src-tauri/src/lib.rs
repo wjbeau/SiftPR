@@ -10,7 +10,7 @@ use tauri::State;
 use ai::AIClient;
 use db::{AISettings, Database, User};
 use error::{AppError, AppResult};
-use github::{GitHubClient, GitHubFile, GitHubPR};
+use github::{GitHubClient, GitHubFile, GitHubPR, GitHubRepo};
 
 /// Application state - only holds database, clients are created as needed
 pub struct AppState {
@@ -109,7 +109,86 @@ fn settings_delete_ai_provider(
     app.db.delete_ai_setting(&user.id, &setting_id)
 }
 
+// Favorites commands
+
+#[tauri::command]
+fn favorites_get(state: State<'_, Mutex<AppState>>) -> AppResult<Vec<i64>> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+    app.db.get_favorite_repos(&user.id)
+}
+
+#[tauri::command]
+fn favorites_add(
+    repo_id: i64,
+    repo_full_name: String,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<()> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+    app.db.add_favorite_repo(&user.id, repo_id, &repo_full_name)
+}
+
+#[tauri::command]
+fn favorites_remove(repo_id: i64, state: State<'_, Mutex<AppState>>) -> AppResult<()> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+    app.db.remove_favorite_repo(&user.id, repo_id)
+}
+
 // GitHub commands
+
+#[tauri::command]
+async fn github_get_repos(
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<Vec<GitHubRepo>> {
+    // Get token from DB (short lock)
+    let token = {
+        let app = state.lock().unwrap();
+        let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+        app.db.get_github_token(&user.id)?
+    };
+
+    // Make async call without holding lock
+    let client = GitHubClient::new();
+    client.get_repos(&token).await
+}
+
+#[tauri::command]
+async fn github_get_repo_prs(
+    owner: String,
+    repo: String,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<Vec<GitHubPR>> {
+    // Get token from DB (short lock)
+    let token = {
+        let app = state.lock().unwrap();
+        let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+        app.db.get_github_token(&user.id)?
+    };
+
+    // Make async call without holding lock
+    let client = GitHubClient::new();
+    client.get_repo_prs(&token, &owner, &repo).await
+}
+
+#[tauri::command]
+async fn github_get_repo_pr_count(
+    owner: String,
+    repo: String,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<i64> {
+    // Get token from DB (short lock)
+    let token = {
+        let app = state.lock().unwrap();
+        let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+        app.db.get_github_token(&user.id)?
+    };
+
+    // Make async call without holding lock
+    let client = GitHubClient::new();
+    client.get_repo_pr_count(&token, &owner, &repo).await
+}
 
 #[tauri::command]
 async fn github_get_pr(
@@ -203,6 +282,12 @@ pub fn run() {
             settings_add_ai_provider,
             settings_activate_ai_provider,
             settings_delete_ai_provider,
+            favorites_get,
+            favorites_add,
+            favorites_remove,
+            github_get_repos,
+            github_get_repo_prs,
+            github_get_repo_pr_count,
             github_get_pr,
             github_get_pr_files,
             ai_analyze_pr,
