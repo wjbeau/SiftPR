@@ -111,6 +111,8 @@ export const github = {
     invoke<GitHubPR[]>("github_get_repo_prs", { owner, repo }),
   getRepoPRCount: (owner: string, repo: string) =>
     invoke<number>("github_get_repo_pr_count", { owner, repo }),
+  getUserReviewedPRs: (owner: string, repo: string, prNumbers: number[]) =>
+    invoke<number[]>("github_get_user_reviewed_prs", { owner, repo, prNumbers }),
   getPR: (url: string) => invoke<GitHubPR>("github_get_pr", { url }),
   getPRFiles: (url: string) => invoke<GitHubFile[]>("github_get_pr_files", { url }),
 };

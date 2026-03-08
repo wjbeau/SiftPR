@@ -3,8 +3,9 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronRight, GitBranch, User } from "lucide-react";
 import { github, GitHubRepo, GitHubPR } from "@/lib/api";
 import { cn, formatDistanceToNow } from "@/lib/utils";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
-interface PRTreeProps {
+interface PRPanelProps {
   repo: GitHubRepo | null;
 }
 
@@ -13,7 +14,7 @@ interface PRNode {
   children: PRNode[];
 }
 
-export function PRTree({ repo }: PRTreeProps) {
+export function PRPanel({ repo }: PRPanelProps) {
   const { data: prs, isLoading, error } = useQuery({
     queryKey: ["repo-prs", repo?.owner.login, repo?.name],
     queryFn: () => github.getRepoPRs(repo!.owner.login, repo!.name),
@@ -21,52 +22,26 @@ export function PRTree({ repo }: PRTreeProps) {
     staleTime: 1000 * 60 * 2, // 2 minutes
   });
 
-  // Build tree structure from PRs
-  // A PR is a child of another if its base branch matches the other's head branch
-  const { prTree, hasChains } = useMemo(() => {
-    if (!prs || prs.length === 0) return { prTree: [], hasChains: false };
+  // Get PR numbers for checking user reviews
+  const prNumbers = useMemo(() => prs?.map((pr) => pr.number) || [], [prs]);
 
-    // Sort PRs by created_at ascending (oldest first)
-    const sortedPRs = [...prs].sort(
-      (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-    );
+  const { data: reviewedPRNumbers = [] } = useQuery({
+    queryKey: ["user-reviewed-prs", repo?.owner.login, repo?.name, prNumbers],
+    queryFn: () =>
+      github.getUserReviewedPRs(repo!.owner.login, repo!.name, prNumbers),
+    enabled: !!repo && prNumbers.length > 0,
+    staleTime: 1000 * 60 * 2,
+  });
 
-    // Create a map of head branch -> PR
-    const headBranchMap = new Map<string, GitHubPR>();
-    for (const pr of sortedPRs) {
-      headBranchMap.set(pr.head.ref, pr);
-    }
-
-    // Find parent/child relationships
-    const childPRs = new Set<number>();
-    const prChildren = new Map<number, GitHubPR[]>();
-
-    for (const pr of sortedPRs) {
-      const parentPR = headBranchMap.get(pr.base.ref);
-      if (parentPR && parentPR.number !== pr.number) {
-        childPRs.add(pr.number);
-        const children = prChildren.get(parentPR.number) || [];
-        children.push(pr);
-        prChildren.set(parentPR.number, children);
-      }
-    }
-
-    // Check if any chains exist
-    const hasChains = childPRs.size > 0;
-
-    // Build tree recursively (children already sorted by created_at)
-    function buildNode(pr: GitHubPR): PRNode {
-      const children = prChildren.get(pr.number) || [];
-      return {
-        pr,
-        children: children.map(buildNode),
-      };
-    }
-
-    // Root PRs are those not in childPRs (already sorted)
-    const roots = sortedPRs.filter((pr) => !childPRs.has(pr.number));
-    return { prTree: roots.map(buildNode), hasChains };
-  }, [prs]);
+  // Split PRs into active reviews and open PRs
+  const { activeReviews, openPRs } = useMemo(() => {
+    if (!prs) return { activeReviews: [], openPRs: [] };
+    const reviewedSet = new Set(reviewedPRNumbers);
+    return {
+      activeReviews: prs.filter((pr) => reviewedSet.has(pr.number)),
+      openPRs: prs.filter((pr) => !reviewedSet.has(pr.number)),
+    };
+  }, [prs, reviewedPRNumbers]);
 
   if (!repo) {
     return (
@@ -101,20 +76,120 @@ export function PRTree({ repo }: PRTreeProps) {
   }
 
   return (
-    <div className="h-full overflow-y-auto">
+    <div className="h-full flex flex-col">
       <div className="p-4 border-b">
         <h2 className="font-semibold">{repo.full_name}</h2>
         <p className="text-sm text-muted-foreground">
           {prs.length} open pull request{prs.length !== 1 ? "s" : ""}
-          {hasChains && (
-            <span className="ml-2 inline-flex items-center gap-1 text-blue-600 dark:text-blue-400">
-              <GitBranch className="h-3 w-3" />
-              includes chains
-            </span>
-          )}
         </p>
       </div>
-      <ul className="p-2">
+
+      <Tabs defaultValue="active" className="flex-1 flex flex-col">
+        <div className="px-4 pt-2">
+          <TabsList className="w-full">
+            <TabsTrigger value="active" className="flex-1">
+              Active Reviews
+              {activeReviews.length > 0 && (
+                <span className="ml-1.5 bg-primary/20 text-primary px-1.5 py-0.5 rounded-full text-xs">
+                  {activeReviews.length}
+                </span>
+              )}
+            </TabsTrigger>
+            <TabsTrigger value="open" className="flex-1">
+              Open PRs
+              {openPRs.length > 0 && (
+                <span className="ml-1.5 bg-muted px-1.5 py-0.5 rounded-full text-xs">
+                  {openPRs.length}
+                </span>
+              )}
+            </TabsTrigger>
+          </TabsList>
+        </div>
+
+        <TabsContent value="active" className="flex-1 overflow-y-auto mt-0">
+          {activeReviews.length === 0 ? (
+            <div className="p-4 text-sm text-muted-foreground text-center">
+              No PRs where you've reviewed or commented
+            </div>
+          ) : (
+            <PRList prs={activeReviews} />
+          )}
+        </TabsContent>
+
+        <TabsContent value="open" className="flex-1 overflow-y-auto mt-0">
+          {openPRs.length === 0 ? (
+            <div className="p-4 text-sm text-muted-foreground text-center">
+              All open PRs have your reviews
+            </div>
+          ) : (
+            <PRList prs={openPRs} />
+          )}
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+}
+
+// Keep the old export name for backwards compatibility
+export { PRPanel as PRTree };
+
+interface PRListProps {
+  prs: GitHubPR[];
+}
+
+function PRList({ prs }: PRListProps) {
+  // Build tree structure from PRs
+  const { prTree, hasChains } = useMemo(() => {
+    if (prs.length === 0) return { prTree: [], hasChains: false };
+
+    // Sort PRs by created_at ascending (oldest first)
+    const sortedPRs = [...prs].sort(
+      (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    );
+
+    // Create a map of head branch -> PR
+    const headBranchMap = new Map<string, GitHubPR>();
+    for (const pr of sortedPRs) {
+      headBranchMap.set(pr.head.ref, pr);
+    }
+
+    // Find parent/child relationships
+    const childPRs = new Set<number>();
+    const prChildren = new Map<number, GitHubPR[]>();
+
+    for (const pr of sortedPRs) {
+      const parentPR = headBranchMap.get(pr.base.ref);
+      if (parentPR && parentPR.number !== pr.number) {
+        childPRs.add(pr.number);
+        const children = prChildren.get(parentPR.number) || [];
+        children.push(pr);
+        prChildren.set(parentPR.number, children);
+      }
+    }
+
+    const hasChains = childPRs.size > 0;
+
+    function buildNode(pr: GitHubPR): PRNode {
+      const children = prChildren.get(pr.number) || [];
+      return {
+        pr,
+        children: children.map(buildNode),
+      };
+    }
+
+    const roots = sortedPRs.filter((pr) => !childPRs.has(pr.number));
+    return { prTree: roots.map(buildNode), hasChains };
+  }, [prs]);
+
+  return (
+    <div className="p-2">
+      {hasChains && (
+        <div className="px-2 pb-2 text-xs text-blue-600 dark:text-blue-400 flex items-center gap-1">
+          <GitBranch className="h-3 w-3" />
+          includes stacked PRs
+        </div>
+      )}
+      <ul>
         {prTree.map((node) => (
           <PRNodeItem
             key={node.pr.number}
@@ -165,7 +240,6 @@ function PRNodeItem({ node, depth, isTreeView }: PRNodeItemProps) {
           className="block py-3 px-3"
         >
           <div className="flex items-start gap-2">
-            {/* Collapse button for nodes with children */}
             {hasChildren && isTreeView ? (
               <button
                 onClick={toggleExpand}

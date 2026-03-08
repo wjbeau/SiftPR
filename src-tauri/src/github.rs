@@ -73,6 +73,21 @@ pub struct RepoWithPRCount {
     pub open_pr_count: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitHubReview {
+    pub id: i64,
+    pub user: GitHubPRUser,
+    pub state: String,
+    pub submitted_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GitHubComment {
+    pub id: i64,
+    pub user: GitHubPRUser,
+    pub created_at: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GitHubFile {
     pub filename: String,
@@ -300,6 +315,75 @@ impl GitHubClient {
         }
 
         Ok(response.json().await?)
+    }
+
+    /// Get reviews for a pull request
+    pub async fn get_pr_reviews(&self, token: &str, owner: &str, repo: &str, pr_number: i64) -> AppResult<Vec<GitHubReview>> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/pulls/{}/reviews",
+            owner, repo, pr_number
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Accept", "application/vnd.github.v3+json")
+            .header("User-Agent", "SiftPR")
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(AppError::GitHub(format!(
+                "Failed to get PR reviews: {}",
+                response.status()
+            )));
+        }
+
+        Ok(response.json().await?)
+    }
+
+    /// Get comments for a pull request (issue comments, not review comments)
+    pub async fn get_pr_comments(&self, token: &str, owner: &str, repo: &str, pr_number: i64) -> AppResult<Vec<GitHubComment>> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}/issues/{}/comments",
+            owner, repo, pr_number
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Accept", "application/vnd.github.v3+json")
+            .header("User-Agent", "SiftPR")
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(AppError::GitHub(format!(
+                "Failed to get PR comments: {}",
+                response.status()
+            )));
+        }
+
+        Ok(response.json().await?)
+    }
+
+    /// Check if user has reviewed or commented on a PR
+    pub async fn has_user_interacted(&self, token: &str, owner: &str, repo: &str, pr_number: i64, username: &str) -> AppResult<bool> {
+        // Check reviews
+        let reviews = self.get_pr_reviews(token, owner, repo, pr_number).await?;
+        if reviews.iter().any(|r| r.user.login.eq_ignore_ascii_case(username)) {
+            return Ok(true);
+        }
+
+        // Check comments
+        let comments = self.get_pr_comments(token, owner, repo, pr_number).await?;
+        if comments.iter().any(|c| c.user.login.eq_ignore_ascii_case(username)) {
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 
     /// Get raw file content

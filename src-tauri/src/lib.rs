@@ -191,6 +191,34 @@ async fn github_get_repo_pr_count(
 }
 
 #[tauri::command]
+async fn github_get_user_reviewed_prs(
+    owner: String,
+    repo: String,
+    pr_numbers: Vec<i64>,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<Vec<i64>> {
+    // Get token and username from DB (short lock)
+    let (token, username) = {
+        let app = state.lock().unwrap();
+        let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+        let token = app.db.get_github_token(&user.id)?;
+        (token, user.github_username)
+    };
+
+    // Check each PR for user interaction
+    let client = GitHubClient::new();
+    let mut reviewed_prs = Vec::new();
+
+    for pr_number in pr_numbers {
+        if client.has_user_interacted(&token, &owner, &repo, pr_number, &username).await? {
+            reviewed_prs.push(pr_number);
+        }
+    }
+
+    Ok(reviewed_prs)
+}
+
+#[tauri::command]
 async fn github_get_pr(
     url: String,
     state: State<'_, Mutex<AppState>>,
@@ -288,6 +316,7 @@ pub fn run() {
             github_get_repos,
             github_get_repo_prs,
             github_get_repo_pr_count,
+            github_get_user_reviewed_prs,
             github_get_pr,
             github_get_pr_files,
             ai_analyze_pr,
