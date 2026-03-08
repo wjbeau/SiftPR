@@ -1,5 +1,6 @@
 import { Outlet, Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
+import { useTheme } from "@/contexts/ThemeContext";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -10,11 +11,12 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { TabBar } from "@/components/TabBar";
 import { useTabs } from "@/contexts/TabsContext";
-import { Settings, LogOut, ChevronDown } from "lucide-react";
+import { Settings, LogOut, ChevronDown, Sun, Moon, Monitor } from "lucide-react";
 
 export function Layout() {
   const { user, isLoading, logout } = useAuth();
   const { setActiveTab } = useTabs();
+  const { theme, setTheme } = useTheme();
   const navigate = useNavigate();
 
   const handleLogout = async () => {
@@ -24,6 +26,24 @@ export function Layout() {
 
   const handleLogoClick = () => {
     setActiveTab("home");
+  };
+
+  const cycleTheme = () => {
+    if (theme === "light") setTheme("dark");
+    else if (theme === "dark") setTheme("system");
+    else setTheme("light");
+  };
+
+  const getThemeIcon = () => {
+    if (theme === "light") return <Sun className="h-4 w-4" />;
+    if (theme === "dark") return <Moon className="h-4 w-4" />;
+    return <Monitor className="h-4 w-4" />;
+  };
+
+  const getThemeLabel = () => {
+    if (theme === "light") return "Light";
+    if (theme === "dark") return "Dark";
+    return "System";
   };
 
   if (isLoading) {
@@ -70,6 +90,18 @@ export function Layout() {
                       <Settings className="h-4 w-4" />
                       Settings
                     </Link>
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onClick={cycleTheme}
+                    className="flex items-center justify-between"
+                  >
+                    <span className="flex items-center gap-2">
+                      {getThemeIcon()}
+                      Theme
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      {getThemeLabel()}
+                    </span>
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem

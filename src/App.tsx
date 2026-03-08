@@ -1,6 +1,7 @@
 import { Routes, Route } from "react-router-dom";
 import { AuthProvider } from "./contexts/AuthContext";
 import { TabsProvider } from "./contexts/TabsContext";
+import { ThemeProvider } from "./contexts/ThemeContext";
 import { Layout } from "./components/Layout";
 import { Home } from "./pages/Home";
 import { Login } from "./pages/Login";
@@ -9,22 +10,24 @@ import { Review } from "./pages/Review";
 
 function App() {
   return (
-    <AuthProvider>
-      <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route
-          element={
-            <TabsProvider>
-              <Layout />
-            </TabsProvider>
-          }
-        >
-          <Route path="/" element={<Home />} />
-          <Route path="/settings/*" element={<Settings />} />
-          <Route path="/review/:owner/:repo/:prNumber" element={<Review />} />
-        </Route>
-      </Routes>
-    </AuthProvider>
+    <ThemeProvider>
+      <AuthProvider>
+        <Routes>
+          <Route path="/login" element={<Login />} />
+          <Route
+            element={
+              <TabsProvider>
+                <Layout />
+              </TabsProvider>
+            }
+          >
+            <Route path="/" element={<Home />} />
+            <Route path="/settings/*" element={<Settings />} />
+            <Route path="/review/:owner/:repo/:prNumber" element={<Review />} />
+          </Route>
+        </Routes>
+      </AuthProvider>
+    </ThemeProvider>
   );
 }
 
