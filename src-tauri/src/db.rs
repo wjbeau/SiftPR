@@ -1,5 +1,5 @@
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -42,9 +42,34 @@ impl Database {
                 github_username TEXT NOT NULL,
                 github_avatar_url TEXT,
                 github_access_token TEXT NOT NULL,
+                github_refresh_token TEXT,
+                token_expires_at INTEGER,
+                refresh_token_expires_at INTEGER,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
+
+            -- Migration: Add token columns if they don't exist (for existing databases)
+            -- SQLite doesn't support IF NOT EXISTS for ALTER TABLE, so we ignore errors
+            "#,
+        )?;
+
+        // Run migrations for existing databases (ignore errors if columns already exist)
+        let _ = conn.execute(
+            "ALTER TABLE users ADD COLUMN github_refresh_token TEXT",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE users ADD COLUMN token_expires_at INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE users ADD COLUMN refresh_token_expires_at INTEGER",
+            [],
+        );
+
+        conn.execute_batch(
+            r#"
 
             CREATE TABLE IF NOT EXISTS reviews (
                 id TEXT PRIMARY KEY,
@@ -137,6 +162,83 @@ impl Database {
                 updated_at TEXT NOT NULL,
                 UNIQUE(user_id, agent_type)
             );
+
+            CREATE TABLE IF NOT EXISTS agent_mcp_servers (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id),
+                agent_type TEXT NOT NULL,
+                server_name TEXT NOT NULL,
+                server_command TEXT NOT NULL,
+                server_args TEXT,
+                server_env TEXT,
+                transport_type TEXT NOT NULL DEFAULT 'stdio',
+                http_url TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(user_id, agent_type, server_name)
+            );
+
+            CREATE TABLE IF NOT EXISTS user_service_keys (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id),
+                service_name TEXT NOT NULL,
+                api_key TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(user_id, service_name)
+            );
+
+            CREATE TABLE IF NOT EXISTS research_agent_settings (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id),
+                model_preference TEXT,
+                max_iterations INTEGER NOT NULL DEFAULT 10,
+                timeout_seconds INTEGER NOT NULL DEFAULT 120,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(user_id)
+            );
+
+            -- Semantic codebase indexing tables
+            CREATE TABLE IF NOT EXISTS codebase_indexes (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id),
+                repo_full_name TEXT NOT NULL,
+                local_path TEXT NOT NULL,
+                last_indexed_commit TEXT,
+                embedding_provider TEXT NOT NULL,
+                embedding_model TEXT NOT NULL,
+                embedding_dimensions INTEGER NOT NULL,
+                total_chunks INTEGER DEFAULT 0,
+                index_status TEXT DEFAULT 'pending',
+                error_message TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(user_id, repo_full_name)
+            );
+
+            CREATE TABLE IF NOT EXISTS chunk_metadata (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                index_id TEXT NOT NULL REFERENCES codebase_indexes(id) ON DELETE CASCADE,
+                file_path TEXT NOT NULL,
+                chunk_type TEXT NOT NULL,
+                name TEXT NOT NULL,
+                signature TEXT,
+                language TEXT NOT NULL,
+                start_line INTEGER NOT NULL,
+                end_line INTEGER NOT NULL,
+                content TEXT NOT NULL,
+                docstring TEXT,
+                parent_name TEXT,
+                visibility TEXT,
+                embedding BLOB NOT NULL,
+                created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_chunk_metadata_index_id ON chunk_metadata(index_id);
+            CREATE INDEX IF NOT EXISTS idx_chunk_metadata_name ON chunk_metadata(name);
+            CREATE INDEX IF NOT EXISTS idx_chunk_metadata_file_path ON chunk_metadata(file_path);
             "#,
         )?;
 
@@ -165,22 +267,35 @@ impl Database {
         Ok(user)
     }
 
-    pub fn upsert_user(&self, id: &str, username: &str, avatar_url: Option<&str>, access_token: &str) -> AppResult<User> {
+    pub fn upsert_user(
+        &self,
+        id: &str,
+        username: &str,
+        avatar_url: Option<&str>,
+        access_token: &str,
+        refresh_token: Option<&str>,
+        token_expires_at: Option<i64>,
+        refresh_token_expires_at: Option<i64>,
+    ) -> AppResult<User> {
         let conn = self.conn.lock().unwrap();
-        let encrypted_token = encrypt(access_token)?;
+        let encrypted_access = encrypt(access_token)?;
+        let encrypted_refresh = refresh_token.map(encrypt).transpose()?;
         let now = Utc::now().to_rfc3339();
 
         conn.execute(
             r#"
-            INSERT INTO users (id, github_username, github_avatar_url, github_access_token, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+            INSERT INTO users (id, github_username, github_avatar_url, github_access_token, github_refresh_token, token_expires_at, refresh_token_expires_at, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
             ON CONFLICT(id) DO UPDATE SET
                 github_username = ?2,
                 github_avatar_url = ?3,
                 github_access_token = ?4,
-                updated_at = ?5
+                github_refresh_token = ?5,
+                token_expires_at = ?6,
+                refresh_token_expires_at = ?7,
+                updated_at = ?8
             "#,
-            params![id, username, avatar_url, encrypted_token, now],
+            params![id, username, avatar_url, encrypted_access, encrypted_refresh, token_expires_at, refresh_token_expires_at, now],
         )?;
 
         Ok(User {
@@ -192,6 +307,7 @@ impl Database {
         })
     }
 
+    /// Get just the access token (for simple API calls)
     pub fn get_github_token(&self, user_id: &str) -> AppResult<String> {
         let conn = self.conn.lock().unwrap();
         let encrypted: String = conn.query_row(
@@ -203,12 +319,67 @@ impl Database {
         decrypt(&encrypted)
     }
 
+    /// Get full token data including refresh token and expiration
+    pub fn get_github_tokens(&self, user_id: &str) -> AppResult<(String, Option<String>, Option<i64>, Option<i64>)> {
+        let conn = self.conn.lock().unwrap();
+        let row: (String, Option<String>, Option<i64>, Option<i64>) = conn.query_row(
+            "SELECT github_access_token, github_refresh_token, token_expires_at, refresh_token_expires_at FROM users WHERE id = ?1",
+            params![user_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+
+        let access_token = decrypt(&row.0)?;
+        let refresh_token = row.1.map(|r| decrypt(&r)).transpose()?;
+        Ok((access_token, refresh_token, row.2, row.3))
+    }
+
+    /// Update tokens after a refresh
+    pub fn update_github_tokens(
+        &self,
+        user_id: &str,
+        access_token: &str,
+        refresh_token: Option<&str>,
+        token_expires_at: Option<i64>,
+        refresh_token_expires_at: Option<i64>,
+    ) -> AppResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let encrypted_access = encrypt(access_token)?;
+        let encrypted_refresh = refresh_token.map(encrypt).transpose()?;
+        let now = Utc::now().to_rfc3339();
+
+        conn.execute(
+            r#"
+            UPDATE users SET
+                github_access_token = ?2,
+                github_refresh_token = ?3,
+                token_expires_at = ?4,
+                refresh_token_expires_at = ?5,
+                updated_at = ?6
+            WHERE id = ?1
+            "#,
+            params![user_id, encrypted_access, encrypted_refresh, token_expires_at, refresh_token_expires_at, now],
+        )?;
+
+        Ok(())
+    }
+
     pub fn delete_user(&self, user_id: &str) -> AppResult<()> {
         let conn = self.conn.lock().unwrap();
+        // Delete from all tables that reference users(id)
         conn.execute("DELETE FROM favorite_repos WHERE user_id = ?1", params![user_id])?;
         conn.execute("DELETE FROM user_ai_settings WHERE user_id = ?1", params![user_id])?;
+        conn.execute("DELETE FROM pr_review_state WHERE user_id = ?1", params![user_id])?;
+        conn.execute("DELETE FROM linked_repos WHERE user_id = ?1", params![user_id])?;
+        conn.execute("DELETE FROM pr_analyses WHERE user_id = ?1", params![user_id])?;
+        conn.execute("DELETE FROM agent_settings WHERE user_id = ?1", params![user_id])?;
+        conn.execute("DELETE FROM agent_mcp_servers WHERE user_id = ?1", params![user_id])?;
+        conn.execute("DELETE FROM user_service_keys WHERE user_id = ?1", params![user_id])?;
+        conn.execute("DELETE FROM research_agent_settings WHERE user_id = ?1", params![user_id])?;
+        // Delete codebase indexes (chunks are deleted by CASCADE)
+        conn.execute("DELETE FROM codebase_indexes WHERE user_id = ?1", params![user_id])?;
         conn.execute("DELETE FROM review_comments WHERE review_id IN (SELECT id FROM reviews WHERE user_id = ?1)", params![user_id])?;
         conn.execute("DELETE FROM reviews WHERE user_id = ?1", params![user_id])?;
+        // Finally delete the user
         conn.execute("DELETE FROM users WHERE id = ?1", params![user_id])?;
         Ok(())
     }
@@ -239,28 +410,58 @@ impl Database {
 
     pub fn add_ai_settings(&self, user_id: &str, provider: &str, api_key: &str, model: &str) -> AppResult<AISettings> {
         let conn = self.conn.lock().unwrap();
-        let id = uuid::Uuid::new_v4().to_string();
         // Trim whitespace from API key to avoid authentication issues
         let encrypted_key = encrypt(api_key.trim())?;
         let now = Utc::now().to_rfc3339();
 
-        conn.execute(
-            r#"
-            INSERT INTO user_ai_settings (id, user_id, provider, api_key, model_preference, is_active, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)
-            "#,
-            params![id, user_id, provider, encrypted_key, model, now],
-        )?;
+        // Check if provider already exists for this user
+        let existing: Option<(String, bool, String)> = conn.query_row(
+            "SELECT id, is_active, created_at FROM user_ai_settings WHERE user_id = ?1 AND provider = ?2",
+            params![user_id, provider],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional()?;
 
-        Ok(AISettings {
-            id,
-            user_id: user_id.to_string(),
-            provider: provider.to_string(),
-            model_preference: model.to_string(),
-            is_active: false,
-            created_at: now.clone(),
-            updated_at: now,
-        })
+        if let Some((existing_id, is_active, created_at)) = existing {
+            // Update existing provider entry with new model and API key
+            conn.execute(
+                r#"
+                UPDATE user_ai_settings
+                SET api_key = ?1, model_preference = ?2, updated_at = ?3
+                WHERE id = ?4
+                "#,
+                params![encrypted_key, model, now, existing_id],
+            )?;
+
+            Ok(AISettings {
+                id: existing_id,
+                user_id: user_id.to_string(),
+                provider: provider.to_string(),
+                model_preference: model.to_string(),
+                is_active,
+                created_at,
+                updated_at: now,
+            })
+        } else {
+            // Insert new provider entry
+            let id = uuid::Uuid::new_v4().to_string();
+            conn.execute(
+                r#"
+                INSERT INTO user_ai_settings (id, user_id, provider, api_key, model_preference, is_active, created_at, updated_at)
+                VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?6)
+                "#,
+                params![id, user_id, provider, encrypted_key, model, now],
+            )?;
+
+            Ok(AISettings {
+                id,
+                user_id: user_id.to_string(),
+                provider: provider.to_string(),
+                model_preference: model.to_string(),
+                is_active: false,
+                created_at: now.clone(),
+                updated_at: now,
+            })
+        }
     }
 
     pub fn activate_ai_setting(&self, user_id: &str, setting_id: &str) -> AppResult<()> {
@@ -693,6 +894,512 @@ impl Database {
             updated_at: now,
         })
     }
+
+    // MCP Server operations
+
+    pub fn get_mcp_servers(&self, user_id: &str, agent_type: &str) -> AppResult<Vec<MCPServerConfig>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, user_id, agent_type, server_name, server_command, server_args, server_env, transport_type, http_url, enabled, created_at, updated_at
+             FROM agent_mcp_servers WHERE user_id = ?1 AND agent_type = ?2"
+        )?;
+
+        let servers = stmt.query_map(params![user_id, agent_type], |row| {
+            let args_json: Option<String> = row.get(5)?;
+            let env_json: Option<String> = row.get(6)?;
+            Ok(MCPServerConfig {
+                id: row.get(0)?,
+                user_id: row.get(1)?,
+                agent_type: row.get(2)?,
+                server_name: row.get(3)?,
+                server_command: row.get(4)?,
+                server_args: args_json.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
+                server_env: env_json.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
+                transport_type: row.get(7)?,
+                http_url: row.get(8)?,
+                enabled: row.get(9)?,
+                created_at: row.get(10)?,
+                updated_at: row.get(11)?,
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+
+        Ok(servers)
+    }
+
+    pub fn get_all_mcp_servers(&self, user_id: &str) -> AppResult<Vec<MCPServerConfig>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, user_id, agent_type, server_name, server_command, server_args, server_env, transport_type, http_url, enabled, created_at, updated_at
+             FROM agent_mcp_servers WHERE user_id = ?1"
+        )?;
+
+        let servers = stmt.query_map(params![user_id], |row| {
+            let args_json: Option<String> = row.get(5)?;
+            let env_json: Option<String> = row.get(6)?;
+            Ok(MCPServerConfig {
+                id: row.get(0)?,
+                user_id: row.get(1)?,
+                agent_type: row.get(2)?,
+                server_name: row.get(3)?,
+                server_command: row.get(4)?,
+                server_args: args_json.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
+                server_env: env_json.and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default(),
+                transport_type: row.get(7)?,
+                http_url: row.get(8)?,
+                enabled: row.get(9)?,
+                created_at: row.get(10)?,
+                updated_at: row.get(11)?,
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+
+        Ok(servers)
+    }
+
+    pub fn add_mcp_server(
+        &self,
+        user_id: &str,
+        agent_type: &str,
+        server_name: &str,
+        server_command: &str,
+        server_args: &[String],
+        server_env: &std::collections::HashMap<String, String>,
+        transport_type: &str,
+        http_url: Option<&str>,
+    ) -> AppResult<MCPServerConfig> {
+        let conn = self.conn.lock().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        let args_json = serde_json::to_string(server_args)
+            .map_err(|e| AppError::Internal(format!("Failed to serialize args: {}", e)))?;
+        let env_json = serde_json::to_string(server_env)
+            .map_err(|e| AppError::Internal(format!("Failed to serialize env: {}", e)))?;
+
+        conn.execute(
+            r#"
+            INSERT INTO agent_mcp_servers (id, user_id, agent_type, server_name, server_command, server_args, server_env, transport_type, http_url, enabled, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?10)
+            "#,
+            params![id, user_id, agent_type, server_name, server_command, args_json, env_json, transport_type, http_url, now],
+        )?;
+
+        Ok(MCPServerConfig {
+            id,
+            user_id: user_id.to_string(),
+            agent_type: agent_type.to_string(),
+            server_name: server_name.to_string(),
+            server_command: server_command.to_string(),
+            server_args: server_args.to_vec(),
+            server_env: server_env.clone(),
+            transport_type: transport_type.to_string(),
+            http_url: http_url.map(|s| s.to_string()),
+            enabled: true,
+            created_at: now.clone(),
+            updated_at: now,
+        })
+    }
+
+    pub fn delete_mcp_server(&self, user_id: &str, agent_type: &str, server_name: &str) -> AppResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM agent_mcp_servers WHERE user_id = ?1 AND agent_type = ?2 AND server_name = ?3",
+            params![user_id, agent_type, server_name],
+        )?;
+        Ok(())
+    }
+
+    // Service Keys operations
+
+    pub fn get_service_keys(&self, user_id: &str) -> AppResult<Vec<ServiceKeyInfo>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, user_id, service_name, created_at, updated_at
+             FROM user_service_keys WHERE user_id = ?1"
+        )?;
+
+        let keys = stmt.query_map(params![user_id], |row| {
+            Ok(ServiceKeyInfo {
+                id: row.get(0)?,
+                user_id: row.get(1)?,
+                service_name: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+
+        Ok(keys)
+    }
+
+    pub fn get_service_key(&self, user_id: &str, service_name: &str) -> AppResult<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.query_row(
+            "SELECT api_key FROM user_service_keys WHERE user_id = ?1 AND service_name = ?2",
+            params![user_id, service_name],
+            |row| row.get::<_, String>(0),
+        ).ok();
+
+        if let Some(encrypted_key) = result {
+            let api_key = decrypt(&encrypted_key)?;
+            Ok(Some(api_key))
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub fn set_service_key(&self, user_id: &str, service_name: &str, api_key: &str) -> AppResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+        let encrypted_key = encrypt(api_key.trim())?;
+
+        conn.execute(
+            r#"
+            INSERT INTO user_service_keys (id, user_id, service_name, api_key, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?5)
+            ON CONFLICT(user_id, service_name) DO UPDATE SET
+                api_key = ?4,
+                updated_at = ?5
+            "#,
+            params![id, user_id, service_name, encrypted_key, now],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn delete_service_key(&self, user_id: &str, service_name: &str) -> AppResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM user_service_keys WHERE user_id = ?1 AND service_name = ?2",
+            params![user_id, service_name],
+        )?;
+        Ok(())
+    }
+
+    // Research Agent Settings operations
+
+    pub fn get_research_agent_settings(&self, user_id: &str) -> AppResult<Option<ResearchAgentSettings>> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.query_row(
+            "SELECT id, user_id, model_preference, max_iterations, timeout_seconds, created_at, updated_at
+             FROM research_agent_settings WHERE user_id = ?1",
+            params![user_id],
+            |row| {
+                Ok(ResearchAgentSettings {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    model_preference: row.get(2)?,
+                    max_iterations: row.get(3)?,
+                    timeout_seconds: row.get(4)?,
+                    created_at: row.get(5)?,
+                    updated_at: row.get(6)?,
+                })
+            },
+        ).ok();
+
+        Ok(result)
+    }
+
+    pub fn save_research_agent_settings(
+        &self,
+        user_id: &str,
+        model_preference: Option<&str>,
+        max_iterations: u32,
+        timeout_seconds: u32,
+    ) -> AppResult<ResearchAgentSettings> {
+        let conn = self.conn.lock().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+
+        conn.execute(
+            r#"
+            INSERT INTO research_agent_settings (id, user_id, model_preference, max_iterations, timeout_seconds, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+            ON CONFLICT(user_id) DO UPDATE SET
+                model_preference = ?3,
+                max_iterations = ?4,
+                timeout_seconds = ?5,
+                updated_at = ?6
+            "#,
+            params![id, user_id, model_preference, max_iterations, timeout_seconds, now],
+        )?;
+
+        Ok(ResearchAgentSettings {
+            id,
+            user_id: user_id.to_string(),
+            model_preference: model_preference.map(|s| s.to_string()),
+            max_iterations,
+            timeout_seconds,
+            created_at: now.clone(),
+            updated_at: now,
+        })
+    }
+
+    // Codebase Index operations
+
+    pub fn create_codebase_index(
+        &self,
+        user_id: &str,
+        repo_full_name: &str,
+        local_path: &str,
+        embedding_provider: &str,
+        embedding_model: &str,
+        embedding_dimensions: u32,
+    ) -> AppResult<CodebaseIndex> {
+        let conn = self.conn.lock().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+
+        conn.execute(
+            r#"
+            INSERT INTO codebase_indexes (id, user_id, repo_full_name, local_path, embedding_provider, embedding_model, embedding_dimensions, index_status, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, ?8)
+            ON CONFLICT(user_id, repo_full_name) DO UPDATE SET
+                local_path = ?4,
+                embedding_provider = ?5,
+                embedding_model = ?6,
+                embedding_dimensions = ?7,
+                index_status = 'pending',
+                error_message = NULL,
+                updated_at = ?8
+            "#,
+            params![id, user_id, repo_full_name, local_path, embedding_provider, embedding_model, embedding_dimensions, now],
+        )?;
+
+        // Get the actual ID (might be existing one on conflict)
+        let actual_id: String = conn.query_row(
+            "SELECT id FROM codebase_indexes WHERE user_id = ?1 AND repo_full_name = ?2",
+            params![user_id, repo_full_name],
+            |row| row.get(0),
+        )?;
+
+        Ok(CodebaseIndex {
+            id: actual_id,
+            user_id: user_id.to_string(),
+            repo_full_name: repo_full_name.to_string(),
+            local_path: local_path.to_string(),
+            last_indexed_commit: None,
+            embedding_provider: embedding_provider.to_string(),
+            embedding_model: embedding_model.to_string(),
+            embedding_dimensions,
+            total_chunks: 0,
+            index_status: IndexStatus::Pending,
+            error_message: None,
+            created_at: now.clone(),
+            updated_at: now,
+        })
+    }
+
+    pub fn get_codebase_index(&self, user_id: &str, repo_full_name: &str) -> AppResult<Option<CodebaseIndex>> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.query_row(
+            "SELECT id, user_id, repo_full_name, local_path, last_indexed_commit, embedding_provider, embedding_model, embedding_dimensions, total_chunks, index_status, error_message, created_at, updated_at
+             FROM codebase_indexes WHERE user_id = ?1 AND repo_full_name = ?2",
+            params![user_id, repo_full_name],
+            |row| {
+                let status_str: String = row.get(9)?;
+                Ok(CodebaseIndex {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    repo_full_name: row.get(2)?,
+                    local_path: row.get(3)?,
+                    last_indexed_commit: row.get(4)?,
+                    embedding_provider: row.get(5)?,
+                    embedding_model: row.get(6)?,
+                    embedding_dimensions: row.get(7)?,
+                    total_chunks: row.get(8)?,
+                    index_status: IndexStatus::from_str(&status_str),
+                    error_message: row.get(10)?,
+                    created_at: row.get(11)?,
+                    updated_at: row.get(12)?,
+                })
+            },
+        ).ok();
+
+        Ok(result)
+    }
+
+    pub fn update_index_status(&self, index_id: &str, status: IndexStatus, error_message: Option<&str>) -> AppResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+
+        conn.execute(
+            "UPDATE codebase_indexes SET index_status = ?1, error_message = ?2, updated_at = ?3 WHERE id = ?4",
+            params![status.as_str(), error_message, now, index_id],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn update_index_complete(&self, index_id: &str, commit_sha: &str, total_chunks: u32) -> AppResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+
+        conn.execute(
+            "UPDATE codebase_indexes SET index_status = 'complete', last_indexed_commit = ?1, total_chunks = ?2, error_message = NULL, updated_at = ?3 WHERE id = ?4",
+            params![commit_sha, total_chunks, now, index_id],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn delete_codebase_index(&self, user_id: &str, repo_full_name: &str) -> AppResult<()> {
+        let conn = self.conn.lock().unwrap();
+        // Chunks are deleted by CASCADE
+        conn.execute(
+            "DELETE FROM codebase_indexes WHERE user_id = ?1 AND repo_full_name = ?2",
+            params![user_id, repo_full_name],
+        )?;
+        Ok(())
+    }
+
+    // Chunk operations
+
+    pub fn clear_chunks_for_index(&self, index_id: &str) -> AppResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM chunk_metadata WHERE index_id = ?1", params![index_id])?;
+        Ok(())
+    }
+
+    pub fn insert_chunk(
+        &self,
+        index_id: &str,
+        file_path: &str,
+        chunk_type: &ChunkType,
+        name: &str,
+        signature: Option<&str>,
+        language: &str,
+        start_line: u32,
+        end_line: u32,
+        content: &str,
+        docstring: Option<&str>,
+        parent_name: Option<&str>,
+        visibility: Option<&str>,
+        embedding: &[f32],
+    ) -> AppResult<i64> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+
+        // Convert f32 slice to bytes for BLOB storage
+        let embedding_bytes: Vec<u8> = embedding.iter()
+            .flat_map(|f| f.to_le_bytes())
+            .collect();
+
+        conn.execute(
+            r#"
+            INSERT INTO chunk_metadata (index_id, file_path, chunk_type, name, signature, language, start_line, end_line, content, docstring, parent_name, visibility, embedding, created_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+            "#,
+            params![
+                index_id, file_path, chunk_type.as_str(), name, signature, language,
+                start_line, end_line, content, docstring, parent_name, visibility,
+                embedding_bytes, now
+            ],
+        )?;
+
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn get_all_chunks_for_index(&self, index_id: &str) -> AppResult<Vec<(ChunkMetadata, Vec<f32>)>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, index_id, file_path, chunk_type, name, signature, language, start_line, end_line, content, docstring, parent_name, visibility, embedding, created_at
+             FROM chunk_metadata WHERE index_id = ?1"
+        )?;
+
+        let chunks = stmt.query_map(params![index_id], |row| {
+            let chunk_type_str: String = row.get(3)?;
+            let embedding_bytes: Vec<u8> = row.get(13)?;
+
+            // Convert bytes back to f32 slice
+            let embedding: Vec<f32> = embedding_bytes
+                .chunks_exact(4)
+                .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+                .collect();
+
+            Ok((
+                ChunkMetadata {
+                    id: row.get(0)?,
+                    index_id: row.get(1)?,
+                    file_path: row.get(2)?,
+                    chunk_type: ChunkType::from_str(&chunk_type_str),
+                    name: row.get(4)?,
+                    signature: row.get(5)?,
+                    language: row.get(6)?,
+                    start_line: row.get(7)?,
+                    end_line: row.get(8)?,
+                    content: row.get(9)?,
+                    docstring: row.get(10)?,
+                    parent_name: row.get(11)?,
+                    visibility: row.get(12)?,
+                    created_at: row.get(14)?,
+                },
+                embedding,
+            ))
+        })?.collect::<Result<Vec<_>, _>>()?;
+
+        Ok(chunks)
+    }
+
+    pub fn get_chunk_by_id(&self, chunk_id: i64) -> AppResult<Option<ChunkMetadata>> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.query_row(
+            "SELECT id, index_id, file_path, chunk_type, name, signature, language, start_line, end_line, content, docstring, parent_name, visibility, created_at
+             FROM chunk_metadata WHERE id = ?1",
+            params![chunk_id],
+            |row| {
+                let chunk_type_str: String = row.get(3)?;
+                Ok(ChunkMetadata {
+                    id: row.get(0)?,
+                    index_id: row.get(1)?,
+                    file_path: row.get(2)?,
+                    chunk_type: ChunkType::from_str(&chunk_type_str),
+                    name: row.get(4)?,
+                    signature: row.get(5)?,
+                    language: row.get(6)?,
+                    start_line: row.get(7)?,
+                    end_line: row.get(8)?,
+                    content: row.get(9)?,
+                    docstring: row.get(10)?,
+                    parent_name: row.get(11)?,
+                    visibility: row.get(12)?,
+                    created_at: row.get(13)?,
+                })
+            },
+        ).ok();
+
+        Ok(result)
+    }
+
+    pub fn search_chunks_by_name(&self, index_id: &str, query: &str, limit: u32) -> AppResult<Vec<ChunkMetadata>> {
+        let conn = self.conn.lock().unwrap();
+        let pattern = format!("%{}%", query);
+        let mut stmt = conn.prepare(
+            "SELECT id, index_id, file_path, chunk_type, name, signature, language, start_line, end_line, content, docstring, parent_name, visibility, created_at
+             FROM chunk_metadata WHERE index_id = ?1 AND (name LIKE ?2 OR content LIKE ?2)
+             LIMIT ?3"
+        )?;
+
+        let chunks = stmt.query_map(params![index_id, pattern, limit], |row| {
+            let chunk_type_str: String = row.get(3)?;
+            Ok(ChunkMetadata {
+                id: row.get(0)?,
+                index_id: row.get(1)?,
+                file_path: row.get(2)?,
+                chunk_type: ChunkType::from_str(&chunk_type_str),
+                name: row.get(4)?,
+                signature: row.get(5)?,
+                language: row.get(6)?,
+                start_line: row.get(7)?,
+                end_line: row.get(8)?,
+                content: row.get(9)?,
+                docstring: row.get(10)?,
+                parent_name: row.get(11)?,
+                visibility: row.get(12)?,
+                created_at: row.get(13)?,
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+
+        Ok(chunks)
+    }
 }
 
 fn get_database_path() -> AppResult<PathBuf> {
@@ -790,4 +1497,148 @@ pub struct AgentSettings {
     pub enabled: bool,
     pub created_at: String,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MCPServerConfig {
+    pub id: String,
+    pub user_id: String,
+    pub agent_type: String,
+    pub server_name: String,
+    pub server_command: String,
+    pub server_args: Vec<String>,
+    pub server_env: std::collections::HashMap<String, String>,
+    pub transport_type: String,
+    pub http_url: Option<String>,
+    pub enabled: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceKeyInfo {
+    pub id: String,
+    pub user_id: String,
+    pub service_name: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResearchAgentSettings {
+    pub id: String,
+    pub user_id: String,
+    pub model_preference: Option<String>,
+    pub max_iterations: u32,
+    pub timeout_seconds: u32,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+// Codebase indexing types
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodebaseIndex {
+    pub id: String,
+    pub user_id: String,
+    pub repo_full_name: String,
+    pub local_path: String,
+    pub last_indexed_commit: Option<String>,
+    pub embedding_provider: String,
+    pub embedding_model: String,
+    pub embedding_dimensions: u32,
+    pub total_chunks: u32,
+    pub index_status: IndexStatus,
+    pub error_message: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum IndexStatus {
+    Pending,
+    Indexing,
+    Complete,
+    Failed,
+}
+
+impl IndexStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            IndexStatus::Pending => "pending",
+            IndexStatus::Indexing => "indexing",
+            IndexStatus::Complete => "complete",
+            IndexStatus::Failed => "failed",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "indexing" => IndexStatus::Indexing,
+            "complete" => IndexStatus::Complete,
+            "failed" => IndexStatus::Failed,
+            _ => IndexStatus::Pending,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChunkMetadata {
+    pub id: i64,
+    pub index_id: String,
+    pub file_path: String,
+    pub chunk_type: ChunkType,
+    pub name: String,
+    pub signature: Option<String>,
+    pub language: String,
+    pub start_line: u32,
+    pub end_line: u32,
+    pub content: String,
+    pub docstring: Option<String>,
+    pub parent_name: Option<String>,
+    pub visibility: Option<String>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "lowercase")]
+pub enum ChunkType {
+    Function,
+    Method,
+    Class,
+    Struct,
+    Interface,
+    Enum,
+    Trait,
+    Module,
+}
+
+impl ChunkType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ChunkType::Function => "function",
+            ChunkType::Method => "method",
+            ChunkType::Class => "class",
+            ChunkType::Struct => "struct",
+            ChunkType::Interface => "interface",
+            ChunkType::Enum => "enum",
+            ChunkType::Trait => "trait",
+            ChunkType::Module => "module",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "function" => ChunkType::Function,
+            "method" => ChunkType::Method,
+            "class" => ChunkType::Class,
+            "struct" => ChunkType::Struct,
+            "interface" => ChunkType::Interface,
+            "enum" => ChunkType::Enum,
+            "trait" => ChunkType::Trait,
+            "module" => ChunkType::Module,
+            _ => ChunkType::Function,
+        }
+    }
 }

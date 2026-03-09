@@ -4,14 +4,16 @@ mod crypto;
 mod db;
 mod error;
 mod github;
+mod indexer;
+mod parser;
 
 use std::sync::Mutex;
 use tauri::State;
 
-use ai::{AIClient, ModelInfo, OrchestratedAnalysis, Orchestrator, prompts, types::AgentType, orchestrator::AgentConfig};
+use ai::{AIClient, MCPManager, MCPTool, ModelInfo, OrchestratedAnalysis, Orchestrator, prompts, types::AgentType, orchestrator::{AgentConfig, ToolConfig}, tools::ToolExecutionConfig};
 use db::{AISettings, AgentSettings, CodebaseProfile, Database, LinkedRepo, PRReviewState, User};
 use error::{AppError, AppResult};
-use github::{GitHubClient, GitHubFile, GitHubPR, GitHubRepo};
+use github::{GitHubClient, GitHubFile, GitHubPR, GitHubRepo, OAuthTokens};
 
 /// Application state - only holds database, clients are created as needed
 pub struct AppState {
@@ -32,11 +34,11 @@ async fn auth_exchange_code(
 ) -> AppResult<User> {
     let client = GitHubClient::new();
 
-    // Exchange code for token
-    let token = client.exchange_code(&code).await?;
+    // Exchange code for tokens
+    let tokens = client.exchange_code(&code).await?;
 
     // Get user info
-    let github_user = client.get_user(&token).await?;
+    let github_user = client.get_user(&tokens.access_token).await?;
 
     // Save to database (lock only for DB operation)
     let user = {
@@ -45,11 +47,72 @@ async fn auth_exchange_code(
             &github_user.id.to_string(),
             &github_user.login,
             Some(&github_user.avatar_url),
-            &token,
+            &tokens.access_token,
+            tokens.refresh_token.as_deref(),
+            tokens.expires_at,
+            tokens.refresh_token_expires_at,
         )?
     };
 
     Ok(user)
+}
+
+/// Helper function to get a valid access token, refreshing if expired
+/// Returns (token, user_id) for use in API calls
+async fn get_valid_token(state: &State<'_, Mutex<AppState>>) -> AppResult<(String, String)> {
+    // Get token info while holding lock briefly
+    let (user_id, access_token, refresh_token, expires_at, refresh_expires_at) = {
+        let app = state.lock().unwrap();
+        let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+        let (access_token, refresh_token, expires_at, refresh_expires_at) = app.db.get_github_tokens(&user.id)?;
+        (user.id, access_token, refresh_token, expires_at, refresh_expires_at)
+    };
+
+    // Check if token is expired or about to expire (within 5 minutes)
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    let buffer_seconds = 300; // 5 minutes buffer
+
+    if let Some(exp) = expires_at {
+        if now >= exp - buffer_seconds {
+            // Token is expired or expiring soon, try to refresh
+            if let Some(ref refresh) = refresh_token {
+                // Check if refresh token is still valid
+                if let Some(refresh_exp) = refresh_expires_at {
+                    if now >= refresh_exp {
+                        return Err(AppError::Unauthorized);
+                    }
+                }
+
+                // Refresh the token (no lock held during async call)
+                let client = GitHubClient::new();
+                let new_tokens = client.refresh_token(refresh).await?;
+
+                // Update in database (reacquire lock)
+                {
+                    let app = state.lock().unwrap();
+                    app.db.update_github_tokens(
+                        &user_id,
+                        &new_tokens.access_token,
+                        new_tokens.refresh_token.as_deref(),
+                        new_tokens.expires_at,
+                        new_tokens.refresh_token_expires_at,
+                    )?;
+                }
+
+                return Ok((new_tokens.access_token, user_id));
+            } else {
+                // No refresh token and access token expired
+                return Err(AppError::Unauthorized);
+            }
+        }
+    }
+
+    // Token is still valid (or non-expiring)
+    Ok((access_token, user_id))
 }
 
 #[tauri::command]
@@ -87,7 +150,20 @@ fn settings_add_ai_provider(
 ) -> AppResult<AISettings> {
     let app = state.lock().unwrap();
     let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
-    app.db.add_ai_settings(&user.id, &provider, &api_key, &model)
+
+    // If api_key is empty, look up existing API key for this provider
+    let actual_api_key = if api_key.is_empty() {
+        let settings = app.db.get_ai_settings(&user.id)?;
+        if let Some(existing) = settings.iter().find(|s| s.provider == provider) {
+            app.db.get_ai_setting_api_key(&existing.id)?
+        } else {
+            return Err(AppError::AIProvider(format!("No API key configured for provider: {}", provider)));
+        }
+    } else {
+        api_key
+    };
+
+    app.db.add_ai_settings(&user.id, &provider, &actual_api_key, &model)
 }
 
 #[tauri::command]
@@ -175,14 +251,7 @@ fn favorites_remove(repo_id: i64, state: State<'_, Mutex<AppState>>) -> AppResul
 async fn github_get_repos(
     state: State<'_, Mutex<AppState>>,
 ) -> AppResult<Vec<GitHubRepo>> {
-    // Get token from DB (short lock)
-    let token = {
-        let app = state.lock().unwrap();
-        let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
-        app.db.get_github_token(&user.id)?
-    };
-
-    // Make async call without holding lock
+    let (token, _) = get_valid_token(&state).await?;
     let client = GitHubClient::new();
     client.get_repos(&token).await
 }
@@ -193,14 +262,7 @@ async fn github_get_repo_prs(
     repo: String,
     state: State<'_, Mutex<AppState>>,
 ) -> AppResult<Vec<GitHubPR>> {
-    // Get token from DB (short lock)
-    let token = {
-        let app = state.lock().unwrap();
-        let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
-        app.db.get_github_token(&user.id)?
-    };
-
-    // Make async call without holding lock
+    let (token, _) = get_valid_token(&state).await?;
     let client = GitHubClient::new();
     client.get_repo_prs(&token, &owner, &repo).await
 }
@@ -211,14 +273,7 @@ async fn github_get_repo_pr_count(
     repo: String,
     state: State<'_, Mutex<AppState>>,
 ) -> AppResult<i64> {
-    // Get token from DB (short lock)
-    let token = {
-        let app = state.lock().unwrap();
-        let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
-        app.db.get_github_token(&user.id)?
-    };
-
-    // Make async call without holding lock
+    let (token, _) = get_valid_token(&state).await?;
     let client = GitHubClient::new();
     client.get_repo_pr_count(&token, &owner, &repo).await
 }
@@ -230,15 +285,13 @@ async fn github_get_user_reviewed_prs(
     pr_numbers: Vec<i64>,
     state: State<'_, Mutex<AppState>>,
 ) -> AppResult<Vec<i64>> {
-    // Get token and username from DB (short lock)
-    let (token, username) = {
+    let (token, _) = get_valid_token(&state).await?;
+    let username = {
         let app = state.lock().unwrap();
         let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
-        let token = app.db.get_github_token(&user.id)?;
-        (token, user.github_username)
+        user.github_username
     };
 
-    // Check each PR for user interaction
     let client = GitHubClient::new();
     let mut reviewed_prs = Vec::new();
 
@@ -257,15 +310,7 @@ async fn github_get_pr(
     state: State<'_, Mutex<AppState>>,
 ) -> AppResult<GitHubPR> {
     let (owner, repo, pr_number) = github::parse_pr_url(&url)?;
-
-    // Get token from DB (short lock)
-    let token = {
-        let app = state.lock().unwrap();
-        let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
-        app.db.get_github_token(&user.id)?
-    };
-
-    // Make async call without holding lock
+    let (token, _) = get_valid_token(&state).await?;
     let client = GitHubClient::new();
     client.get_pr(&token, &owner, &repo, pr_number).await
 }
@@ -276,15 +321,7 @@ async fn github_get_pr_files(
     state: State<'_, Mutex<AppState>>,
 ) -> AppResult<Vec<GitHubFile>> {
     let (owner, repo, pr_number) = github::parse_pr_url(&url)?;
-
-    // Get token from DB (short lock)
-    let token = {
-        let app = state.lock().unwrap();
-        let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
-        app.db.get_github_token(&user.id)?
-    };
-
-    // Make async call without holding lock
+    let (token, _) = get_valid_token(&state).await?;
     let client = GitHubClient::new();
     client.get_pr_files(&token, &owner, &repo, pr_number).await
 }
@@ -297,15 +334,15 @@ async fn ai_analyze_pr(
     state: State<'_, Mutex<AppState>>,
 ) -> AppResult<ai::PRAnalysis> {
     let (owner, repo, pr_number) = github::parse_pr_url(&url)?;
+    let (token, _) = get_valid_token(&state).await?;
 
-    // Get user data and AI settings from DB (short lock)
-    let (token, provider, api_key, model) = {
+    // Get AI settings from DB (short lock)
+    let (provider, api_key, model) = {
         let app = state.lock().unwrap();
         let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
-        let token = app.db.get_github_token(&user.id)?;
         let (settings, key) = app.db.get_active_ai_setting(&user.id)?
             .ok_or(AppError::AIProvider("No AI provider configured".to_string()))?;
-        (token, settings.provider, key, settings.model_preference)
+        (settings.provider, key, settings.model_preference)
     };
 
     // Get PR details (no lock held)
@@ -333,29 +370,27 @@ async fn ai_analyze_pr_orchestrated(
 ) -> AppResult<OrchestratedAnalysis> {
     let (owner, repo, pr_number) = github::parse_pr_url(&url)?;
     let repo_full_name = format!("{}/{}", owner, repo);
+    let (token, _) = get_valid_token(&state).await?;
 
-    // Get user data, AI settings, and agent settings from DB (short lock)
-    let (token, provider, api_key, model, codebase_context, agent_configs) = {
+    // Get AI settings, and agent settings from DB (short lock)
+    let (provider, api_key, model, codebase_context, agent_configs, user_id, linked_repo_path) = {
         let app = state.lock().unwrap();
         let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
-        let token = app.db.get_github_token(&user.id)?;
         let (settings, key) = app.db.get_active_ai_setting(&user.id)?
             .ok_or(AppError::AIProvider("No AI provider configured".to_string()))?;
 
-        // Get codebase context if requested
+        // Get linked repo info and codebase context if requested
+        let linked = app.db.get_linked_repo(&user.id, &repo_full_name)?;
         let context = if with_codebase_context.unwrap_or(false) {
-            if let Some(linked) = app.db.get_linked_repo(&user.id, &repo_full_name)? {
-                if let Some(profile) = linked.profile_data {
-                    Some(codebase::generate_context_summary(&profile))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+            linked.as_ref().and_then(|l| {
+                l.profile_data.as_ref().map(|profile| {
+                    codebase::generate_context_summary(profile)
+                })
+            })
         } else {
             None
         };
+        let linked_path = linked.map(|l| l.local_path);
 
         // Get agent settings and convert to AgentConfigs
         let agent_settings = app.db.get_agent_settings(&user.id)?;
@@ -371,16 +406,25 @@ async fn ai_analyze_pr_orchestrated(
                 enabled: setting.map(|s| s.enabled).unwrap_or(true),
                 model_override: setting.and_then(|s| s.model_override.clone()),
                 custom_prompt: setting.and_then(|s| s.custom_prompt.clone()),
+                use_tools: linked_path.is_some(), // Enable tools if repo is linked
             }
         }).collect();
 
-        (token, settings.provider, key, settings.model_preference, context, configs)
+        (settings.provider, key, settings.model_preference, context, configs, user.id, linked_path)
     };
 
     // Get PR details (no lock held)
     let github_client = GitHubClient::new();
     let pr = github_client.get_pr(&token, &owner, &repo, pr_number).await?;
     let files = github_client.get_pr_files(&token, &owner, &repo, pr_number).await?;
+
+    // Build tool config if repo is linked
+    let tool_config = linked_repo_path.map(|path| ToolConfig {
+        repo_path: Some(path),
+        repo_full_name: Some(repo_full_name.clone()),
+        user_id: user_id.clone(),
+        execution_config: ToolExecutionConfig::default(),
+    });
 
     // Run orchestrated analysis with all agents (no lock held)
     let orchestrator = Orchestrator::new();
@@ -393,6 +437,7 @@ async fn ai_analyze_pr_orchestrated(
         &files,
         codebase_context.as_deref(),
         Some(agent_configs),
+        tool_config,
     ).await
 }
 
@@ -470,14 +515,22 @@ async fn github_compare_commits(
     head: String,
     state: State<'_, Mutex<AppState>>,
 ) -> AppResult<Vec<GitHubFile>> {
-    let token = {
-        let app = state.lock().unwrap();
-        let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
-        app.db.get_github_token(&user.id)?
-    };
-
+    let (token, _) = get_valid_token(&state).await?;
     let client = GitHubClient::new();
     client.compare_commits(&token, &owner, &repo, &base, &head).await
+}
+
+#[tauri::command]
+async fn github_get_file_content(
+    owner: String,
+    repo: String,
+    path: String,
+    ref_name: String,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<String> {
+    let (token, _) = get_valid_token(&state).await?;
+    let client = GitHubClient::new();
+    client.get_file_content(&token, &owner, &repo, &path, &ref_name).await
 }
 
 #[tauri::command]
@@ -490,12 +543,7 @@ async fn github_submit_review(
     comments: Vec<github::ReviewComment>,
     state: State<'_, Mutex<AppState>>,
 ) -> AppResult<()> {
-    let token = {
-        let app = state.lock().unwrap();
-        let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
-        app.db.get_github_token(&user.id)?
-    };
-
+    let (token, _) = get_valid_token(&state).await?;
     let client = GitHubClient::new();
     client.submit_review(&token, &owner, &repo, pr_number, &event, &body, comments).await
 }
@@ -603,13 +651,8 @@ async fn codebase_clone_repo(
     destination_path: String,
     state: State<'_, Mutex<AppState>>,
 ) -> AppResult<LinkedRepo> {
-    // Get user and token
-    let (user_id, token) = {
-        let app = state.lock().unwrap();
-        let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
-        let token = app.db.get_github_token(&user.id)?;
-        (user.id, token)
-    };
+    // Get valid token (with refresh if needed)
+    let (token, user_id) = get_valid_token(&state).await?;
 
     // Validate destination path exists
     let dest_path = std::path::Path::new(&destination_path);
@@ -673,6 +716,140 @@ async fn codebase_clone_repo(
     };
 
     Ok(linked_repo)
+}
+
+// Codebase indexing commands
+
+#[derive(serde::Serialize)]
+pub struct IndexStatus {
+    pub status: String,
+    pub last_indexed_commit: Option<String>,
+    pub total_chunks: u32,
+    pub error_message: Option<String>,
+}
+
+#[tauri::command]
+async fn codebase_index_start(
+    repo_full_name: String,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<()> {
+    // Get user and linked repo info
+    let (user_id, local_path, embedding_provider, embedding_model, api_key) = {
+        let app = state.lock().unwrap();
+        let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+
+        let linked = app.db.get_linked_repo(&user.id, &repo_full_name)?
+            .ok_or_else(|| AppError::Internal(format!("Repository not linked: {}", repo_full_name)))?;
+
+        // Get active AI provider for embeddings
+        let (settings, key) = app.db.get_active_ai_setting(&user.id)?
+            .ok_or_else(|| AppError::AIProvider("No active AI provider configured".to_string()))?;
+
+        (user.id, linked.local_path, settings.provider, settings.model_preference, key)
+    };
+
+    // Determine embedding model based on provider
+    let embed_model = match embedding_provider.as_str() {
+        "openai" => "text-embedding-3-small",
+        "google" => "text-embedding-004",
+        "anthropic" | "voyage" => "voyage-code-3",
+        _ => "text-embedding-3-small",
+    };
+
+    // Run indexing (this is async)
+    let db = {
+        let app = state.lock().unwrap();
+        // Create a new database connection for the async operation
+        db::Database::new()?
+    };
+
+    indexer::index_repository(
+        &db,
+        &user_id,
+        &repo_full_name,
+        &local_path,
+        &embedding_provider,
+        embed_model,
+        &api_key,
+    ).await?;
+
+    Ok(())
+}
+
+#[tauri::command]
+fn codebase_index_status(
+    repo_full_name: String,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<Option<IndexStatus>> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+
+    let index = app.db.get_codebase_index(&user.id, &repo_full_name)?;
+
+    Ok(index.map(|idx| IndexStatus {
+        status: idx.index_status.as_str().to_string(),
+        last_indexed_commit: idx.last_indexed_commit,
+        total_chunks: idx.total_chunks,
+        error_message: idx.error_message,
+    }))
+}
+
+#[tauri::command]
+async fn codebase_semantic_search(
+    repo_full_name: String,
+    query: String,
+    limit: Option<u32>,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<Vec<db::ChunkMetadata>> {
+    let (index_id, embedding_provider, api_key) = {
+        let app = state.lock().unwrap();
+        let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+
+        let index = app.db.get_codebase_index(&user.id, &repo_full_name)?
+            .ok_or_else(|| AppError::NotFound("Repository not indexed".to_string()))?;
+
+        if index.index_status != db::IndexStatus::Complete {
+            return Err(AppError::Indexing("Index is not complete".to_string()));
+        }
+
+        let (settings, key) = app.db.get_active_ai_setting(&user.id)?
+            .ok_or_else(|| AppError::AIProvider("No active AI provider configured".to_string()))?;
+
+        (index.id, settings.provider, key)
+    };
+
+    // Get embedding provider
+    let provider = ai::embeddings::get_provider(&embedding_provider)
+        .ok_or_else(|| AppError::Embedding(format!("Unknown provider: {}", embedding_provider)))?;
+
+    // Determine embedding model
+    let embed_model = match embedding_provider.as_str() {
+        "openai" => "text-embedding-3-small",
+        "google" => "text-embedding-004",
+        "anthropic" | "voyage" => "voyage-code-3",
+        _ => "text-embedding-3-small",
+    };
+
+    // Generate query embedding
+    let embeddings = provider.embed_texts(&api_key, embed_model, &[query]).await?;
+
+    if embeddings.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Create new database connection for search
+    let db = db::Database::new()?;
+
+    // Search for similar chunks
+    let results = indexer::semantic_search(
+        &db,
+        &index_id,
+        &embeddings[0],
+        limit.unwrap_or(10) as usize,
+        0.5, // Default threshold
+    )?;
+
+    Ok(results.into_iter().map(|(chunk, _score)| chunk).collect())
 }
 
 // Agent settings commands
@@ -743,6 +920,147 @@ fn agents_get_defaults() -> Vec<AgentInfo> {
     ]
 }
 
+// Service Keys commands (for SerpAPI, etc.)
+
+#[tauri::command]
+fn service_keys_get(state: State<'_, Mutex<AppState>>) -> AppResult<Vec<db::ServiceKeyInfo>> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+    app.db.get_service_keys(&user.id)
+}
+
+#[tauri::command]
+fn service_keys_set(
+    service_name: String,
+    api_key: String,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<()> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+    app.db.set_service_key(&user.id, &service_name, &api_key)
+}
+
+#[tauri::command]
+fn service_keys_delete(
+    service_name: String,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<()> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+    app.db.delete_service_key(&user.id, &service_name)
+}
+
+// MCP Server commands
+
+#[tauri::command]
+fn mcp_get_servers(
+    agent_type: String,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<Vec<db::MCPServerConfig>> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+    app.db.get_mcp_servers(&user.id, &agent_type)
+}
+
+#[tauri::command]
+fn mcp_get_all_servers(state: State<'_, Mutex<AppState>>) -> AppResult<Vec<db::MCPServerConfig>> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+    app.db.get_all_mcp_servers(&user.id)
+}
+
+#[tauri::command]
+fn mcp_add_server(
+    agent_type: String,
+    server_name: String,
+    server_command: String,
+    server_args: Vec<String>,
+    server_env: std::collections::HashMap<String, String>,
+    transport_type: String,
+    http_url: Option<String>,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<db::MCPServerConfig> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+    app.db.add_mcp_server(
+        &user.id,
+        &agent_type,
+        &server_name,
+        &server_command,
+        &server_args,
+        &server_env,
+        &transport_type,
+        http_url.as_deref(),
+    )
+}
+
+#[tauri::command]
+fn mcp_remove_server(
+    agent_type: String,
+    server_name: String,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<()> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+    app.db.delete_mcp_server(&user.id, &agent_type, &server_name)
+}
+
+#[tauri::command]
+fn mcp_test_server(
+    server_command: String,
+    server_args: Vec<String>,
+    server_env: std::collections::HashMap<String, String>,
+    transport_type: String,
+    http_url: Option<String>,
+) -> AppResult<Vec<MCPTool>> {
+    // Create a temporary config for testing
+    let config = db::MCPServerConfig {
+        id: String::new(),
+        user_id: String::new(),
+        agent_type: String::new(),
+        server_name: "test".to_string(),
+        server_command,
+        server_args,
+        server_env,
+        transport_type,
+        http_url,
+        enabled: true,
+        created_at: String::new(),
+        updated_at: String::new(),
+    };
+
+    let manager = MCPManager::new();
+    manager.test_connection(&config)
+}
+
+// Research Agent Settings commands
+
+#[tauri::command]
+fn research_agent_get_settings(
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<Option<db::ResearchAgentSettings>> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+    app.db.get_research_agent_settings(&user.id)
+}
+
+#[tauri::command]
+fn research_agent_save_settings(
+    model_preference: Option<String>,
+    max_iterations: u32,
+    timeout_seconds: u32,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<db::ResearchAgentSettings> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+    app.db.save_research_agent_settings(
+        &user.id,
+        model_preference.as_deref(),
+        max_iterations,
+        timeout_seconds,
+    )
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let db = Database::new().expect("Failed to initialize database");
@@ -774,6 +1092,7 @@ pub fn run() {
             github_get_pr,
             github_get_pr_files,
             github_compare_commits,
+            github_get_file_content,
             github_submit_review,
             ai_analyze_pr,
             ai_analyze_pr_orchestrated,
@@ -788,9 +1107,22 @@ pub fn run() {
             codebase_analyze,
             codebase_get_context_summary,
             codebase_clone_repo,
+            codebase_index_start,
+            codebase_index_status,
+            codebase_semantic_search,
             agents_get_settings,
             agents_save_setting,
             agents_get_defaults,
+            service_keys_get,
+            service_keys_set,
+            service_keys_delete,
+            mcp_get_servers,
+            mcp_get_all_servers,
+            mcp_add_server,
+            mcp_remove_server,
+            mcp_test_server,
+            research_agent_get_settings,
+            research_agent_save_settings,
         ])
         .setup(|app| {
             #[cfg(desktop)]

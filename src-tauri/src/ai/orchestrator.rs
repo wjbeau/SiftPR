@@ -8,13 +8,15 @@ use crate::github::GitHubFile;
 
 use super::client::AIClient;
 use super::prompts::{build_agent_prompt, build_files_context, get_system_prompt};
+use super::tools::{ToolContext, ToolExecutionConfig, ToolExecutor};
 use super::types::{
-    AgentFinding, AgentResponse, AgentSummary, AgentType, AnnotationType, FailedAgent,
+    AgentResponse, AgentSummary, AgentType, AnnotationType, FailedAgent,
     FileAnalysis, FileContext, FilePriority, KeyChange, LineAnnotation, OrchestratedAnalysis,
     PRCategory, RawAgentResponse, Severity, TokenUsage,
 };
 
 const AGENT_TIMEOUT_SECS: u64 = 60;
+const AGENT_WITH_TOOLS_TIMEOUT_SECS: u64 = 300; // 5 minutes when using tools
 
 /// Configuration for a single agent
 #[derive(Debug, Clone)]
@@ -23,6 +25,7 @@ pub struct AgentConfig {
     pub enabled: bool,
     pub model_override: Option<String>,
     pub custom_prompt: Option<String>,
+    pub use_tools: bool,
 }
 
 impl AgentConfig {
@@ -32,8 +35,27 @@ impl AgentConfig {
             enabled: true,
             model_override: None,
             custom_prompt: None,
+            use_tools: false,
         }
     }
+
+    pub fn with_tools(mut self) -> Self {
+        self.use_tools = true;
+        self
+    }
+}
+
+/// Configuration for tool usage across agents
+#[derive(Debug, Clone)]
+pub struct ToolConfig {
+    /// Path to the local repository (enables search_repo and read_file tools)
+    pub repo_path: Option<String>,
+    /// Full name of the repository (e.g., "owner/repo") for semantic search
+    pub repo_full_name: Option<String>,
+    /// User ID for accessing stored credentials
+    pub user_id: String,
+    /// Execution limits
+    pub execution_config: ToolExecutionConfig,
 }
 
 pub struct Orchestrator {
@@ -58,6 +80,7 @@ impl Orchestrator {
         files: &[GitHubFile],
         codebase_context: Option<&str>,
         agent_configs: Option<Vec<AgentConfig>>,
+        tool_config: Option<ToolConfig>,
     ) -> AppResult<OrchestratedAnalysis> {
         let start_time = Instant::now();
         let files_context = build_files_context(files);
@@ -84,6 +107,8 @@ impl Orchestrator {
         let performance_config = configs.get(&AgentType::Performance).cloned()
             .unwrap_or_else(|| AgentConfig::default_for(AgentType::Performance));
 
+        let tool_config_ref = tool_config.as_ref();
+
         // Run enabled agents in parallel
         let (security_result, architecture_result, style_result, performance_result) = tokio::join!(
             self.run_agent_if_enabled(
@@ -95,6 +120,7 @@ impl Orchestrator {
                 pr_body,
                 &files_context,
                 codebase_context,
+                tool_config_ref,
             ),
             self.run_agent_if_enabled(
                 &architecture_config,
@@ -105,6 +131,7 @@ impl Orchestrator {
                 pr_body,
                 &files_context,
                 codebase_context,
+                tool_config_ref,
             ),
             self.run_agent_if_enabled(
                 &style_config,
@@ -115,6 +142,7 @@ impl Orchestrator {
                 pr_body,
                 &files_context,
                 codebase_context,
+                tool_config_ref,
             ),
             self.run_agent_if_enabled(
                 &performance_config,
@@ -125,6 +153,7 @@ impl Orchestrator {
                 pr_body,
                 &files_context,
                 codebase_context,
+                tool_config_ref,
             ),
         );
 
@@ -184,6 +213,7 @@ impl Orchestrator {
         pr_body: Option<&str>,
         files_context: &str,
         codebase_context: Option<&str>,
+        tool_config: Option<&ToolConfig>,
     ) -> Option<AppResult<AgentResponse>> {
         if !config.enabled {
             return None;
@@ -195,17 +225,36 @@ impl Orchestrator {
         // Use custom prompt if provided
         let custom_prompt = config.custom_prompt.as_deref();
 
-        Some(self.run_agent(
-            config.agent_type,
-            provider,
-            api_key,
-            model,
-            pr_title,
-            pr_body,
-            files_context,
-            codebase_context,
-            custom_prompt,
-        ).await)
+        // Decide whether to use tools
+        let use_tools = config.use_tools && tool_config.is_some();
+
+        if use_tools {
+            let tool_config = tool_config.unwrap();
+            Some(self.run_agent_with_tools(
+                config.agent_type,
+                provider,
+                api_key,
+                model,
+                pr_title,
+                pr_body,
+                files_context,
+                codebase_context,
+                custom_prompt,
+                tool_config,
+            ).await)
+        } else {
+            Some(self.run_agent(
+                config.agent_type,
+                provider,
+                api_key,
+                model,
+                pr_title,
+                pr_body,
+                files_context,
+                codebase_context,
+                custom_prompt,
+            ).await)
+        }
     }
 
     async fn run_agent(
@@ -269,6 +318,124 @@ impl Orchestrator {
                 println!("[AI] {} agent parse error: {}", agent_type.as_str(), e);
                 e
             })?;
+
+        Ok(AgentResponse {
+            agent_type,
+            summary: AgentSummary {
+                overview: raw_response.summary.overview,
+                risk_assessment: raw_response.summary.risk_assessment,
+                top_concerns: raw_response.summary.top_concerns,
+            },
+            findings: raw_response
+                .findings
+                .into_iter()
+                .map(|f| f.into_finding())
+                .collect(),
+            priority_files: raw_response.priority_files,
+            processing_time_ms,
+            token_usage: Some(TokenUsage {
+                prompt_tokens: estimated_prompt_tokens,
+                completion_tokens: estimated_completion_tokens,
+                total_tokens: estimated_prompt_tokens + estimated_completion_tokens,
+            }),
+        })
+    }
+
+    /// Run an agent with tool support
+    async fn run_agent_with_tools(
+        &self,
+        agent_type: AgentType,
+        provider: &str,
+        api_key: &str,
+        model: &str,
+        pr_title: &str,
+        pr_body: Option<&str>,
+        files_context: &str,
+        codebase_context: Option<&str>,
+        custom_system_prompt: Option<&str>,
+        tool_config: &ToolConfig,
+    ) -> AppResult<AgentResponse> {
+        let start_time = Instant::now();
+
+        // Use custom prompt if provided, otherwise use default
+        let default_prompt = get_system_prompt(agent_type);
+        let base_system_prompt = custom_system_prompt.unwrap_or(default_prompt);
+
+        // Enhance system prompt with tool instructions
+        let system_prompt = format!(
+            "{}\n\n## Available Tools\n\
+            You have access to the following tools to help analyze this PR:\n\
+            - `search_repo`: Search for patterns in the codebase using regex\n\
+            - `read_file`: Read the contents of specific files\n\n\
+            Use these tools when you need to:\n\
+            - Find how a function/class/pattern is used elsewhere in the codebase\n\
+            - Read related files to understand context\n\
+            - Verify your assumptions about the code\n\n\
+            After using tools, provide your final analysis in the expected JSON format.",
+            base_system_prompt
+        );
+
+        let user_prompt = build_agent_prompt(
+            agent_type,
+            pr_title,
+            pr_body,
+            files_context,
+            codebase_context,
+        );
+
+        // Create tool executor and context
+        let tool_executor = ToolExecutor::new(tool_config.execution_config.clone());
+        let tool_context = ToolContext {
+            repo_path: tool_config.repo_path.clone(),
+            repo_full_name: tool_config.repo_full_name.clone(),
+            user_id: tool_config.user_id.clone(),
+        };
+
+        // Apply timeout (longer for tool usage)
+        let result = timeout(
+            Duration::from_secs(AGENT_WITH_TOOLS_TIMEOUT_SECS),
+            tool_executor.execute(
+                &self.client,
+                provider,
+                api_key,
+                model,
+                &system_prompt,
+                &user_prompt,
+                &tool_context,
+            ),
+        )
+        .await
+        .map_err(|_| AppError::AIProvider(format!("{} agent timed out", agent_type.as_str())))?;
+
+        let execution_result = result?;
+        let response_text = execution_result.response;
+        let processing_time_ms = start_time.elapsed().as_millis() as u64;
+
+        println!(
+            "[AI] {} agent (with tools) completed in {}ms ({} tool calls, {} iterations)",
+            agent_type.as_str(),
+            processing_time_ms,
+            execution_result.tool_calls_made,
+            execution_result.iterations
+        );
+
+        println!(
+            "[AI] {} agent raw response (first 500 chars): {}",
+            agent_type.as_str(),
+            &response_text.chars().take(500).collect::<String>()
+        );
+
+        // Estimate token usage
+        let prompt_chars = system_prompt.len() + user_prompt.len();
+        let response_chars = response_text.len();
+        let estimated_prompt_tokens = (prompt_chars / 4) as u32;
+        let estimated_completion_tokens = (response_chars / 4) as u32;
+
+        // Parse the response
+        let raw_response = parse_agent_response(&response_text).map_err(|e| {
+            println!("[AI] {} agent parse error: {}", agent_type.as_str(), e);
+            e
+        })?;
 
         Ok(AgentResponse {
             agent_type,
@@ -485,10 +652,31 @@ impl Orchestrator {
             );
         }
 
+        // Helper to normalize filename (strip leading slash, normalize separators)
+        let normalize_filename = |name: &str| -> String {
+            name.trim_start_matches('/').replace('\\', "/").to_string()
+        };
+
+        // Build a secondary lookup map with normalized keys
+        let normalized_map: HashMap<String, String> = file_map
+            .keys()
+            .map(|k| (normalize_filename(k), k.clone()))
+            .collect();
+
         // Add findings as annotations
         for response in responses {
             for finding in &response.findings {
-                if let Some(analysis) = file_map.get_mut(&finding.file) {
+                // Try exact match first, then normalized match
+                let file_key = if file_map.contains_key(&finding.file) {
+                    Some(finding.file.clone())
+                } else {
+                    // Try normalized match
+                    let normalized = normalize_filename(&finding.file);
+                    normalized_map.get(&normalized).cloned()
+                };
+
+                if let Some(key) = file_key {
+                    if let Some(analysis) = file_map.get_mut(&key) {
                     // Add to agent findings
                     analysis.agent_findings.push(finding.clone());
 
@@ -510,6 +698,7 @@ impl Orchestrator {
                     analysis.importance_score = analysis
                         .importance_score
                         .saturating_add(finding.severity.priority());
+                    }
                 }
             }
         }

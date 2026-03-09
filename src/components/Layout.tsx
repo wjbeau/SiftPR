@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { Outlet, Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import { useTheme } from "@/contexts/ThemeContext";
@@ -14,14 +15,26 @@ import { useTabs } from "@/contexts/TabsContext";
 import { Settings, LogOut, ChevronDown, Sun, Moon, Monitor } from "lucide-react";
 
 export function Layout() {
-  const { user, isLoading, logout } = useAuth();
+  const { user, isLoading, isAuthenticated, logout } = useAuth();
   const { setActiveTab } = useTabs();
   const { theme, setTheme } = useTheme();
   const navigate = useNavigate();
 
-  const handleLogout = async () => {
-    await logout();
-    navigate("/login");
+  // Redirect to login if not authenticated
+  useEffect(() => {
+    if (!isLoading && !isAuthenticated) {
+      navigate("/login");
+    }
+  }, [isLoading, isAuthenticated, navigate]);
+
+  const handleLogout = () => {
+    console.log("Logout clicked");
+    logout().then(() => {
+      console.log("Logout complete, navigating to /login");
+      navigate("/login");
+    }).catch((err) => {
+      console.error("Logout failed:", err);
+    });
   };
 
   const handleLogoClick = () => {
@@ -46,7 +59,8 @@ export function Layout() {
     return "System";
   };
 
-  if (isLoading) {
+  // Show loading while checking auth, or nothing while redirecting to login
+  if (isLoading || !isAuthenticated) {
     return (
       <div className="flex min-h-screen items-center justify-center">
         <div className="text-muted-foreground">Loading...</div>
@@ -92,7 +106,7 @@ export function Layout() {
                     </Link>
                   </DropdownMenuItem>
                   <DropdownMenuItem
-                    onClick={cycleTheme}
+                    onSelect={cycleTheme}
                     className="flex items-center justify-between"
                   >
                     <span className="flex items-center gap-2">
@@ -105,7 +119,7 @@ export function Layout() {
                   </DropdownMenuItem>
                   <DropdownMenuSeparator />
                   <DropdownMenuItem
-                    onClick={handleLogout}
+                    onSelect={handleLogout}
                     className="flex items-center gap-2 text-destructive focus:text-destructive"
                   >
                     <LogOut className="h-4 w-4" />

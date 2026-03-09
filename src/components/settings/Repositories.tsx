@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
-import { codebase, github } from "@/lib/api";
+import { codebase, github, indexing, CodebaseIndexStatus } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -23,7 +23,16 @@ import {
   FolderGit,
   Download,
   FolderOpen,
+  Database,
+  CheckCircle,
+  XCircle,
 } from "lucide-react";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import {
   Tabs,
   TabsContent,
@@ -38,6 +47,7 @@ export function Repositories() {
   const [cloneRepoName, setCloneRepoName] = useState("");
   const [cloneDestPath, setCloneDestPath] = useState("");
   const [analyzingRepo, setAnalyzingRepo] = useState<string | null>(null);
+  const [indexingRepo, setIndexingRepo] = useState<string | null>(null);
 
   // GitHub repos query
   const { data: githubRepos } = useQuery({
@@ -49,6 +59,20 @@ export function Repositories() {
   const { data: linkedRepos, isLoading: linkedReposLoading } = useQuery({
     queryKey: ["codebase", "linked"],
     queryFn: () => codebase.getLinkedRepos(),
+  });
+
+  // Index status queries for linked repos
+  const indexStatusQueries = useQuery({
+    queryKey: ["codebase", "index-status", linkedRepos?.map(r => r.repo_full_name)],
+    queryFn: async () => {
+      if (!linkedRepos) return {};
+      const statuses: Record<string, CodebaseIndexStatus | null> = {};
+      for (const repo of linkedRepos) {
+        statuses[repo.repo_full_name] = await indexing.getStatus(repo.repo_full_name);
+      }
+      return statuses;
+    },
+    enabled: !!linkedRepos && linkedRepos.length > 0,
   });
 
   const linkRepoMutation = useMutation({
@@ -76,6 +100,17 @@ export function Repositories() {
     },
     onError: () => {
       setAnalyzingRepo(null);
+    },
+  });
+
+  const indexRepoMutation = useMutation({
+    mutationFn: (repoFullName: string) => indexing.start(repoFullName),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["codebase", "index-status"] });
+      setIndexingRepo(null);
+    },
+    onError: () => {
+      setIndexingRepo(null);
     },
   });
 
@@ -113,6 +148,46 @@ export function Repositories() {
   const handleAnalyzeRepo = (repoFullName: string) => {
     setAnalyzingRepo(repoFullName);
     analyzeRepoMutation.mutate(repoFullName);
+  };
+
+  const handleIndexRepo = (repoFullName: string) => {
+    setIndexingRepo(repoFullName);
+    indexRepoMutation.mutate(repoFullName);
+  };
+
+  const getIndexStatusInfo = (repoFullName: string): { label: string; color: string; isStale: boolean } => {
+    const indexStatus = indexStatusQueries.data?.[repoFullName];
+    const linkedRepo = linkedRepos?.find(r => r.repo_full_name === repoFullName);
+
+    if (!indexStatus) {
+      return { label: "Not indexed", color: "text-muted-foreground", isStale: false };
+    }
+
+    if (indexStatus.index_status === "failed") {
+      return { label: "Index failed", color: "text-destructive", isStale: false };
+    }
+
+    if (indexStatus.index_status === "indexing") {
+      return { label: "Indexing...", color: "text-blue-600 dark:text-blue-400", isStale: false };
+    }
+
+    if (indexStatus.index_status === "complete") {
+      // Check if index is stale (different commit than last analyzed)
+      const isStale = linkedRepo?.last_analyzed_commit &&
+        indexStatus.last_indexed_commit !== linkedRepo.last_analyzed_commit;
+
+      if (isStale) {
+        return { label: "Index out of date", color: "text-amber-600 dark:text-amber-400", isStale: true };
+      }
+
+      return {
+        label: `Indexed (${indexStatus.total_chunks} chunks)`,
+        color: "text-green-600 dark:text-green-400",
+        isStale: false
+      };
+    }
+
+    return { label: "Pending", color: "text-muted-foreground", isStale: false };
   };
 
   // Filter out already linked repos
@@ -192,6 +267,7 @@ export function Repositories() {
                     </Button>
                   </div>
 
+                  {/* Analysis Status Row */}
                   <div className="flex items-center justify-between text-sm">
                     <div className="text-muted-foreground">
                       {repo.last_analyzed_commit ? (
@@ -228,6 +304,75 @@ export function Repositories() {
                         </>
                       )}
                     </Button>
+                  </div>
+
+                  {/* Index Status Row */}
+                  <div className="flex items-center justify-between text-sm border-t pt-3">
+                    <div className="flex items-center gap-2">
+                      {(() => {
+                        const { label, color, isStale } = getIndexStatusInfo(repo.repo_full_name);
+                        const indexStatus = indexStatusQueries.data?.[repo.repo_full_name];
+                        return (
+                          <>
+                            {indexStatus?.index_status === "complete" && !isStale ? (
+                              <CheckCircle className="h-3 w-3 text-green-600 dark:text-green-400" />
+                            ) : indexStatus?.index_status === "failed" ? (
+                              <XCircle className="h-3 w-3 text-destructive" />
+                            ) : (
+                              <Database className="h-3 w-3 text-muted-foreground" />
+                            )}
+                            <span className={color}>{label}</span>
+                            {indexStatus?.last_indexed_commit && (
+                              <span className="text-xs text-muted-foreground">
+                                @ {indexStatus.last_indexed_commit.slice(0, 7)}
+                              </span>
+                            )}
+                          </>
+                        );
+                      })()}
+                    </div>
+                    <TooltipProvider>
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => handleIndexRepo(repo.repo_full_name)}
+                            disabled={indexingRepo === repo.repo_full_name || !repo.last_analyzed_commit}
+                          >
+                            {indexingRepo === repo.repo_full_name ? (
+                              <>
+                                <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                Indexing...
+                              </>
+                            ) : (
+                              <>
+                                <Database className="h-4 w-4 mr-2" />
+                                {indexStatusQueries.data?.[repo.repo_full_name]?.index_status === "complete"
+                                  ? "Re-index"
+                                  : "Index Repo"}
+                              </>
+                            )}
+                          </Button>
+                        </TooltipTrigger>
+                        <TooltipContent side="left" className="max-w-xs">
+                          <p className="font-medium mb-1">Semantic Code Indexing</p>
+                          <p className="text-xs text-muted-foreground">
+                            Creates a searchable vector index of your codebase, enabling AI agents
+                            to find similar code patterns and detect inconsistencies during PR review.
+                          </p>
+                          <p className="text-xs text-muted-foreground mt-1">
+                            Note: Requires an AI provider for embeddings and uses additional storage
+                            (~10-50MB depending on codebase size).
+                          </p>
+                          {!repo.last_analyzed_commit && (
+                            <p className="text-xs text-amber-600 mt-1">
+                              Analyze the repository first before indexing.
+                            </p>
+                          )}
+                        </TooltipContent>
+                      </Tooltip>
+                    </TooltipProvider>
                   </div>
                 </div>
               ))}

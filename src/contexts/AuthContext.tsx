@@ -44,7 +44,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const handleLogout = async () => {
     await auth.logout();
+    // Clear localStorage caches first
+    localStorage.removeItem("siftpr-cached-repos");
+    localStorage.removeItem("siftpr-cached-favorites");
+    // Set auth to null (triggers re-render)
     queryClient.setQueryData(["auth", "me"], null);
+    // Clear all other cached queries
+    queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== "auth" });
   };
 
   return (

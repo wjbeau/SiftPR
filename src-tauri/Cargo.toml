@@ -21,7 +21,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_urlencoded = "0.7"
 rusqlite = { version = "0.31", features = ["bundled"] }
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"], default-features = false }
 tokio = { version = "1", features = ["full"] }
 aes-gcm = "0.10"
 rand = "0.8"
@@ -30,6 +30,22 @@ uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1"
 dirs = "5"
+regex = "1"
+globset = "0.4"
+ignore = "0.4"
+async-trait = "0.1"
+
+# Tree-sitter for code parsing
+tree-sitter = "0.24"
+tree-sitter-rust = "0.24"
+tree-sitter-typescript = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-python = "0.23"
+tree-sitter-go = "0.23"
+
+# Vector search for semantic code indexing
+instant-distance = "0.6"
+bytemuck = { version = "1", features = ["derive"] }
 
 [profile.release]
 panic = "abort"

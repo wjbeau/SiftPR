@@ -115,7 +115,5 @@ MIT
 
 The following feature ideas need implementation:
 
-- Fast navigation in the PR diffs (e.g. jump to next finding)
-- Ability to expand diff to show additional context around diffed lines
 - Improved agent performance (consider RLM, tools, MCP integration, and scope it to the local repo etc)
 - Pre-ingest repo code into vector db and provide as embedding and check what current repo analysis does

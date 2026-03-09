@@ -88,6 +88,279 @@ impl AIClient {
         self.call_provider(provider, api_key, model, system_prompt, user_prompt).await
     }
 
+    /// Call AI provider with tools support
+    /// Returns the raw JSON response for tool parsing
+    pub async fn call_with_tools(
+        &self,
+        provider: &str,
+        api_key: &str,
+        model: &str,
+        system_prompt: &str,
+        messages: &[serde_json::Value],
+        tools: &serde_json::Value,
+    ) -> AppResult<serde_json::Value> {
+        match provider {
+            "openai" | "openrouter" => {
+                self.call_openai_with_tools(provider, api_key, model, system_prompt, messages, tools).await
+            }
+            "anthropic" => {
+                self.call_anthropic_with_tools(api_key, model, system_prompt, messages, tools).await
+            }
+            "google" => {
+                self.call_google_with_tools(api_key, model, system_prompt, messages, tools).await
+            }
+            "ollama" | "lmstudio" | "openai-compatible" => {
+                // For local providers, use OpenAI-compatible format
+                self.call_openai_compatible_with_tools(api_key, model, system_prompt, messages, tools).await
+            }
+            _ => Err(AppError::AIProvider(format!(
+                "Provider {} does not support tool calling",
+                provider
+            ))),
+        }
+    }
+
+    async fn call_openai_with_tools(
+        &self,
+        provider: &str,
+        api_key: &str,
+        model: &str,
+        system_prompt: &str,
+        messages: &[serde_json::Value],
+        tools: &serde_json::Value,
+    ) -> AppResult<serde_json::Value> {
+        let api_key = api_key.trim();
+
+        let (url, headers) = if provider == "openrouter" {
+            (
+                "https://openrouter.ai/api/v1/chat/completions".to_string(),
+                vec![
+                    ("HTTP-Referer", "https://siftpr.app"),
+                    ("X-Title", "SiftPR"),
+                ],
+            )
+        } else {
+            ("https://api.openai.com/v1/chat/completions".to_string(), vec![])
+        };
+
+        // Build messages array with system prompt
+        let mut all_messages = vec![serde_json::json!({
+            "role": "system",
+            "content": system_prompt
+        })];
+        all_messages.extend(messages.iter().cloned());
+
+        let mut request = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", api_key));
+
+        for (key, value) in headers {
+            request = request.header(key, value);
+        }
+
+        let body = serde_json::json!({
+            "model": model,
+            "messages": all_messages,
+            "tools": tools,
+            "temperature": 0.3
+        });
+
+        let response = request.json(&body).send().await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AppError::AIProvider(format!(
+                "API error {}: {}",
+                status, body
+            )));
+        }
+
+        response.json().await.map_err(|e| {
+            AppError::AIProvider(format!("Failed to parse response: {}", e))
+        })
+    }
+
+    async fn call_anthropic_with_tools(
+        &self,
+        api_key: &str,
+        model: &str,
+        system_prompt: &str,
+        messages: &[serde_json::Value],
+        tools: &serde_json::Value,
+    ) -> AppResult<serde_json::Value> {
+        let api_key = api_key.trim();
+
+        // Convert messages to Anthropic format
+        let anthropic_messages: Vec<serde_json::Value> = messages
+            .iter()
+            .filter_map(|m| {
+                let role = m.get("role")?.as_str()?;
+                match role {
+                    "user" => Some(serde_json::json!({
+                        "role": "user",
+                        "content": m.get("content")
+                    })),
+                    "assistant" => Some(m.clone()),
+                    "tool" => {
+                        // Convert tool results to Anthropic format
+                        Some(serde_json::json!({
+                            "role": "user",
+                            "content": m.get("content")
+                        }))
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+
+        let body = serde_json::json!({
+            "model": model,
+            "max_tokens": 4096,
+            "system": system_prompt,
+            "messages": anthropic_messages,
+            "tools": tools
+        });
+
+        let response = self
+            .client
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AppError::AIProvider(format!(
+                "Anthropic API error {}: {}",
+                status, body
+            )));
+        }
+
+        response.json().await.map_err(|e| {
+            AppError::AIProvider(format!("Failed to parse response: {}", e))
+        })
+    }
+
+    async fn call_google_with_tools(
+        &self,
+        api_key: &str,
+        model: &str,
+        system_prompt: &str,
+        messages: &[serde_json::Value],
+        tools: &serde_json::Value,
+    ) -> AppResult<serde_json::Value> {
+        let api_key = api_key.trim();
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+            model, api_key
+        );
+
+        // Convert messages to Google format
+        let contents: Vec<serde_json::Value> = messages
+            .iter()
+            .filter_map(|m| {
+                let role = m.get("role")?.as_str()?;
+                let google_role = match role {
+                    "user" | "tool" => "user",
+                    "assistant" => "model",
+                    _ => return None,
+                };
+
+                let content = m.get("content")?;
+                Some(serde_json::json!({
+                    "role": google_role,
+                    "parts": [{"text": content}]
+                }))
+            })
+            .collect();
+
+        let body = serde_json::json!({
+            "systemInstruction": {
+                "parts": [{"text": system_prompt}]
+            },
+            "contents": contents,
+            "tools": tools,
+            "generationConfig": {
+                "temperature": 0.3
+            }
+        });
+
+        let response = self.client.post(&url).json(&body).send().await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AppError::AIProvider(format!(
+                "Google AI API error {}: {}",
+                status, body
+            )));
+        }
+
+        response.json().await.map_err(|e| {
+            AppError::AIProvider(format!("Failed to parse response: {}", e))
+        })
+    }
+
+    async fn call_openai_compatible_with_tools(
+        &self,
+        api_key_or_url: &str,
+        model: &str,
+        system_prompt: &str,
+        messages: &[serde_json::Value],
+        tools: &serde_json::Value,
+    ) -> AppResult<serde_json::Value> {
+        let (base_url, api_key) = if api_key_or_url.contains('|') {
+            let parts: Vec<&str> = api_key_or_url.splitn(2, '|').collect();
+            (parts[0], parts.get(1).copied().unwrap_or(""))
+        } else if api_key_or_url.starts_with("http") {
+            (api_key_or_url, "")
+        } else {
+            ("http://localhost:1234", api_key_or_url)
+        };
+
+        let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
+
+        let mut all_messages = vec![serde_json::json!({
+            "role": "system",
+            "content": system_prompt
+        })];
+        all_messages.extend(messages.iter().cloned());
+
+        let body = serde_json::json!({
+            "model": model,
+            "messages": all_messages,
+            "tools": tools,
+            "temperature": 0.3
+        });
+
+        let mut request = self.client.post(&url);
+        if !api_key.is_empty() {
+            request = request.header("Authorization", format!("Bearer {}", api_key));
+        }
+
+        let response = request.json(&body).send().await.map_err(|e| {
+            AppError::AIProvider(format!("Failed to connect to {}: {}", url, e))
+        })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AppError::AIProvider(format!(
+                "API error {}: {}",
+                status, body
+            )));
+        }
+
+        response.json().await.map_err(|e| {
+            AppError::AIProvider(format!("Failed to parse response: {}", e))
+        })
+    }
+
     /// Internal method to route to the appropriate provider
     async fn call_provider(
         &self,

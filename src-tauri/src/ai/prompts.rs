@@ -148,7 +148,9 @@ Respond with a JSON object in this exact format:
 
 Important:
 - Only include findings relevant to {focus_area}
-- Be specific with line numbers when possible
+- Use the EXACT filename as shown in the file headers (e.g., "src/components/Button.tsx", NOT "/src/components/Button.tsx")
+- For line numbers, use the NEW line number from the diff (right side, lines with + prefix). This is critical for annotation placement.
+- Be specific with line numbers when possible - this enables inline annotations in the code review
 - Prioritize actionable findings over minor nitpicks
 - If no issues found, return empty findings array
 - priority_files should list files that need most attention for {focus_area}"#,

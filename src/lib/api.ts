@@ -222,6 +222,8 @@ export const github = {
   getPRFiles: (url: string) => invoke<GitHubFile[]>("github_get_pr_files", { url }),
   compareCommits: (owner: string, repo: string, base: string, head: string) =>
     invoke<GitHubFile[]>("github_compare_commits", { owner, repo, base, head }),
+  getFileContent: (owner: string, repo: string, path: string, refName: string) =>
+    invoke<string>("github_get_file_content", { owner, repo, path, refName }),
   submitReview: (
     owner: string,
     repo: string,
@@ -400,4 +402,160 @@ export const agents = {
       enabled,
     }),
   getDefaults: () => invoke<AgentInfo[]>("agents_get_defaults"),
+};
+
+// Service Keys (for SerpAPI, etc.)
+export interface ServiceKeyInfo {
+  id: string;
+  user_id: string;
+  service_name: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export const serviceKeys = {
+  get: () => invoke<ServiceKeyInfo[]>("service_keys_get"),
+  set: (serviceName: string, apiKey: string) =>
+    invoke<void>("service_keys_set", { serviceName, apiKey }),
+  delete: (serviceName: string) =>
+    invoke<void>("service_keys_delete", { serviceName }),
+};
+
+// MCP Tool from server discovery
+export interface MCPTool {
+  name: string;
+  description: string | null;
+  inputSchema: Record<string, unknown>;
+}
+
+// MCP Server Configuration
+export interface MCPServerConfig {
+  id: string;
+  user_id: string;
+  agent_type: string;
+  server_name: string;
+  server_command: string;
+  server_args: string[];
+  server_env: Record<string, string>;
+  transport_type: string;
+  http_url: string | null;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export const mcp = {
+  getServers: (agentType: string) =>
+    invoke<MCPServerConfig[]>("mcp_get_servers", { agentType }),
+  getAllServers: () => invoke<MCPServerConfig[]>("mcp_get_all_servers"),
+  addServer: (
+    agentType: string,
+    serverName: string,
+    serverCommand: string,
+    serverArgs: string[],
+    serverEnv: Record<string, string>,
+    transportType: string,
+    httpUrl: string | null
+  ) =>
+    invoke<MCPServerConfig>("mcp_add_server", {
+      agentType,
+      serverName,
+      serverCommand,
+      serverArgs,
+      serverEnv,
+      transportType,
+      httpUrl,
+    }),
+  removeServer: (agentType: string, serverName: string) =>
+    invoke<void>("mcp_remove_server", { agentType, serverName }),
+  testServer: (
+    serverCommand: string,
+    serverArgs: string[],
+    serverEnv: Record<string, string>,
+    transportType: string,
+    httpUrl: string | null
+  ) =>
+    invoke<MCPTool[]>("mcp_test_server", {
+      serverCommand,
+      serverArgs,
+      serverEnv,
+      transportType,
+      httpUrl,
+    }),
+};
+
+// Research Agent Settings
+export interface ResearchAgentSettings {
+  id: string;
+  user_id: string;
+  model_preference: string | null;
+  max_iterations: number;
+  timeout_seconds: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export const researchAgent = {
+  getSettings: () =>
+    invoke<ResearchAgentSettings | null>("research_agent_get_settings"),
+  saveSettings: (
+    modelPreference: string | null,
+    maxIterations: number,
+    timeoutSeconds: number
+  ) =>
+    invoke<ResearchAgentSettings>("research_agent_save_settings", {
+      modelPreference,
+      maxIterations,
+      timeoutSeconds,
+    }),
+};
+
+// Codebase Indexing Types
+export type IndexStatus = "pending" | "indexing" | "complete" | "failed";
+export type ChunkType = "function" | "method" | "class" | "struct" | "interface" | "enum" | "trait" | "module";
+
+export interface CodebaseIndexStatus {
+  id: string;
+  repo_full_name: string;
+  local_path: string;
+  last_indexed_commit: string | null;
+  embedding_provider: string;
+  embedding_model: string;
+  total_chunks: number;
+  index_status: IndexStatus;
+  error_message: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ChunkMetadata {
+  id: number;
+  index_id: string;
+  file_path: string;
+  chunk_type: ChunkType;
+  name: string;
+  signature: string | null;
+  language: string;
+  start_line: number;
+  end_line: number;
+  content: string;
+  docstring: string | null;
+  parent_name: string | null;
+  visibility: string | null;
+  created_at: string;
+}
+
+export interface SemanticSearchResult {
+  chunk: ChunkMetadata;
+  similarity: number;
+}
+
+// Codebase Indexing API
+export const indexing = {
+  start: (repoFullName: string) =>
+    invoke<void>("codebase_index_start", { repoFullName }),
+  getStatus: (repoFullName: string) =>
+    invoke<CodebaseIndexStatus | null>("codebase_index_status", { repoFullName }),
+  semanticSearch: (repoFullName: string, query: string, limit?: number, threshold?: number) =>
+    invoke<SemanticSearchResult[]>("codebase_semantic_search", { repoFullName, query, limit, threshold }),
 };

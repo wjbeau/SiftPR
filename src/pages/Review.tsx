@@ -1,8 +1,8 @@
-import { useState, useMemo, useCallback, useEffect } from "react";
+import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
-import { ArrowLeft, FileCode, Loader2, Sparkles, Calendar, MessageSquare, User, Users, GitPullRequest, RefreshCw, ClipboardList, AlertTriangle, BookOpen, Files, ChevronDown, Check, CheckCircle2, XCircle, MessageCircle, Eye, EyeOff, Plus, Send, Filter, History, Pencil, Trash2, X, Shield, Layers, Paintbrush, Zap, FolderOpen, Settings } from "lucide-react";
+import { ArrowLeft, FileCode, Loader2, Sparkles, Calendar, MessageSquare, User, Users, GitPullRequest, RefreshCw, ClipboardList, AlertTriangle, BookOpen, Files, ChevronDown, ChevronUp, Check, CheckCircle2, XCircle, MessageCircle, Eye, EyeOff, Plus, Send, Filter, History, Pencil, Trash2, X, Shield, Layers, Paintbrush, Zap, FolderOpen, Settings } from "lucide-react";
 import { github, GitHubFile, GitHubPR, review, ai, analysis as analysisApi, OrchestratedAnalysis, FileAnalysis, LineAnnotation, AgentType, codebase, LinkedRepo, ReviewComment } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
@@ -181,8 +181,85 @@ export function Review() {
   // Get file analysis for selected file
   const selectedFileAnalysis = useMemo(() => {
     if (!analysis || !selectedFile) return null;
-    return analysis.file_analyses.find(fa => fa.filename === selectedFile.filename) || null;
+    const result = analysis.file_analyses.find(fa => fa.filename === selectedFile.filename) || null;
+    console.log("[Review] selectedFile:", selectedFile?.filename);
+    console.log("[Review] file_analyses filenames:", analysis.file_analyses.map(fa => fa.filename));
+    console.log("[Review] selectedFileAnalysis:", result);
+    console.log("[Review] selectedFileAnalysis annotations:", result?.annotations);
+    return result;
   }, [analysis, selectedFile]);
+
+  // Compute sorted file list matching sidebar order (key changes -> context -> other)
+  const sortedFiles = useMemo(() => {
+    if (!displayFiles.length) return [];
+
+    // If we have AI analysis, use its priorities
+    if (analysis?.file_priorities) {
+      const highPriorityFiles = new Set(
+        analysis.file_priorities
+          .filter(fp => fp.priority_score >= 6)
+          .map(fp => fp.filename)
+      );
+      const mediumPriorityFiles = new Set(
+        analysis.file_priorities
+          .filter(fp => fp.priority_score >= 3 && fp.priority_score < 6)
+          .map(fp => fp.filename)
+      );
+
+      const keyChanges: GitHubFile[] = [];
+      const contextFiles: GitHubFile[] = [];
+      const otherFiles: GitHubFile[] = [];
+
+      for (const file of displayFiles) {
+        if (highPriorityFiles.has(file.filename)) {
+          keyChanges.push(file);
+        } else if (mediumPriorityFiles.has(file.filename)) {
+          contextFiles.push(file);
+        } else {
+          otherFiles.push(file);
+        }
+      }
+
+      return [...keyChanges, ...contextFiles, ...otherFiles];
+    }
+
+    // Fallback: sort by change size, group tests separately
+    const sorted = [...displayFiles].sort(
+      (a, b) => (b.additions + b.deletions) - (a.additions + a.deletions)
+    );
+
+    const keyChanges: GitHubFile[] = [];
+    const contextFiles: GitHubFile[] = [];
+    const otherFiles: GitHubFile[] = [];
+
+    for (const file of sorted) {
+      const filename = file.filename.toLowerCase();
+      if (filename.includes("test") || filename.includes("spec") || filename.includes(".mock")) {
+        contextFiles.push(file);
+      } else if (keyChanges.length < 3 && (file.additions + file.deletions) > 10) {
+        keyChanges.push(file);
+      } else {
+        otherFiles.push(file);
+      }
+    }
+
+    return [...keyChanges, ...contextFiles, ...otherFiles];
+  }, [displayFiles, analysis]);
+
+  // File navigation using sorted order
+  const navigateToNextFile = useCallback(() => {
+    if (!sortedFiles.length) return;
+    const currentIndex = selectedFile ? sortedFiles.findIndex(f => f.filename === selectedFile.filename) : -1;
+    const nextIndex = currentIndex < sortedFiles.length - 1 ? currentIndex + 1 : 0;
+    setSelectedFile(sortedFiles[nextIndex]);
+  }, [sortedFiles, selectedFile]);
+
+  const navigateToPrevFile = useCallback(() => {
+    if (!sortedFiles.length) return;
+    const currentIndex = selectedFile ? sortedFiles.findIndex(f => f.filename === selectedFile.filename) : sortedFiles.length;
+    const prevIndex = currentIndex > 0 ? currentIndex - 1 : sortedFiles.length - 1;
+    setSelectedFile(sortedFiles[prevIndex]);
+  }, [sortedFiles, selectedFile]);
 
   const submitReview = useCallback(async (action: ReviewAction) => {
     if (!owner || !repo || !prNumberInt) return;
@@ -508,11 +585,17 @@ export function Review() {
               <div className="flex-1 overflow-auto">
                 <DiffPanel
                   file={selectedFile}
+                  owner={owner!}
+                  repo={repo!}
+                  baseSha={pr?.base.sha || ""}
+                  headSha={pr?.head.sha || ""}
                   onAddComment={addComment}
                   onEditComment={editComment}
                   onDeleteComment={deleteComment}
                   pendingComments={pendingComments}
                   aiAnnotations={selectedFileAnalysis?.annotations || []}
+                  onNavigateNextFile={navigateToNextFile}
+                  onNavigatePrevFile={navigateToPrevFile}
                 />
               </div>
             </div>
@@ -855,6 +938,17 @@ function AISummarySection({
 
   // Analysis complete - show summary
   if (analysis) {
+    // Debug: Log all findings with their line numbers
+    console.log("[Analysis] All findings with line numbers:");
+    analysis.agent_responses.forEach(r => {
+      r.findings.forEach(f => {
+        console.log(`  [${r.agent_type}] ${f.file}:${f.line ?? 'NO LINE'} - ${f.message.substring(0, 50)}...`);
+      });
+    });
+    console.log("[Analysis] file_analyses count:", analysis.file_analyses.length);
+    analysis.file_analyses.forEach(fa => {
+      console.log(`  File: ${fa.filename}, annotations: ${fa.annotations.length}, agent_findings: ${fa.agent_findings.length}`);
+    });
     const totalFindings = analysis.agent_responses.reduce((sum, r) => sum + r.findings.length, 0);
     const criticalCount = analysis.agent_responses.reduce(
       (sum, r) => sum + r.findings.filter(f => f.severity === "critical" || f.severity === "high").length,
@@ -1923,47 +2017,141 @@ function generateAIAnnotations(file: GitHubFile, rows: DiffRow[]): AIAnnotation[
   return annotations;
 }
 
+interface ExpandedSection {
+  rowIndex: number;
+  lines: string[];
+  loading: boolean;
+  error: string | null;
+}
+
 interface DiffPanelProps {
   file: GitHubFile | null;
+  owner: string;
+  repo: string;
+  baseSha: string;
+  headSha: string;
   onAddComment?: (file: string, lineStart: number, lineEnd: number, body: string) => void;
   onEditComment?: (index: number, newBody: string) => void;
   onDeleteComment?: (index: number) => void;
   pendingComments?: PendingComment[];
   aiAnnotations?: LineAnnotation[];
+  onNavigateNextFile?: () => void;
+  onNavigatePrevFile?: () => void;
 }
 
-function DiffPanel({ file, onAddComment, onEditComment, onDeleteComment, pendingComments = [], aiAnnotations = [] }: DiffPanelProps) {
+function DiffPanel({ file, owner, repo, baseSha, headSha: _headSha, onAddComment, onEditComment, onDeleteComment, pendingComments = [], aiAnnotations = [], onNavigateNextFile, onNavigatePrevFile }: DiffPanelProps) {
+  // Note: _headSha is available for future use (e.g., verifying context lines match)
   const [commentingLines, setCommentingLines] = useState<LineSelection | null>(null);
   const [commentText, setCommentText] = useState("");
   const [selectionStart, setSelectionStart] = useState<number | null>(null);
   const [currentHover, setCurrentHover] = useState<number | null>(null);
   const [hoveredAnnotation, setHoveredAnnotation] = useState<number | null>(null);
-  const [expandedSections, setExpandedSections] = useState<Set<number>>(new Set());
+  const [expandedSections, setExpandedSections] = useState<Map<number, ExpandedSection>>(new Map());
   const [editingCommentIndex, setEditingCommentIndex] = useState<number | null>(null);
   const [editingCommentText, setEditingCommentText] = useState("");
+
+  // Navigation state
+  const [currentNavigationIndex, setCurrentNavigationIndex] = useState<number | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // File content cache for expand
+  const [fileContentCache, setFileContentCache] = useState<{ base: string | null; head: string | null }>({ base: null, head: null });
 
   const diffRows = useMemo(() => {
     if (!file?.patch) return [];
     return parseDiff(file.patch);
   }, [file?.patch]);
 
+  // Build a mapping from file line numbers to row indices
+  const lineNumToRowIndex = useMemo(() => {
+    const map = new Map<number, number>();
+    diffRows.forEach((row) => {
+      // Map by new line number (right side) since that's what annotations reference
+      if (row.right?.newLineNum) {
+        map.set(row.right.newLineNum, row.index);
+      }
+      // Also map old line numbers for context/removed lines
+      if (row.left?.oldLineNum) {
+        // Don't overwrite if already mapped
+        if (!map.has(row.left.oldLineNum)) {
+          map.set(row.left.oldLineNum, row.index);
+        }
+      }
+    });
+    return map;
+  }, [diffRows]);
+
+  // Helper to find closest row for a line number not in the diff
+  const findClosestRow = useCallback((lineNum: number): number | null => {
+    // First try exact match
+    const exact = lineNumToRowIndex.get(lineNum);
+    if (exact !== undefined) return exact;
+
+    // Find the closest row that's visible in the diff
+    let closestRow: number | null = null;
+    let closestDist = Infinity;
+
+    for (const row of diffRows) {
+      const rightLine = row.right?.newLineNum;
+      const leftLine = row.left?.oldLineNum;
+
+      if (rightLine !== undefined) {
+        const dist = Math.abs(rightLine - lineNum);
+        if (dist < closestDist) {
+          closestDist = dist;
+          closestRow = row.index;
+        }
+      }
+      if (leftLine !== undefined) {
+        const dist = Math.abs(leftLine - lineNum);
+        if (dist < closestDist) {
+          closestDist = dist;
+          closestRow = row.index;
+        }
+      }
+    }
+
+    // Only return if within 5 lines of a visible row
+    return closestDist <= 5 ? closestRow : null;
+  }, [diffRows, lineNumToRowIndex]);
+
   // Use AI annotations from analysis if available, otherwise fall back to generated ones
   const effectiveAnnotations: AIAnnotation[] = useMemo(() => {
     if (aiAnnotations.length > 0) {
+      // Debug logging
+      console.log("[DiffPanel] aiAnnotations received:", aiAnnotations);
+      console.log("[DiffPanel] lineNumToRowIndex size:", lineNumToRowIndex.size);
+      console.log("[DiffPanel] lineNumToRowIndex entries (first 20):",
+        Array.from(lineNumToRowIndex.entries()).slice(0, 20));
+
       // Convert LineAnnotation to AIAnnotation format for display
-      return aiAnnotations.map(a => ({
-        lineIndex: a.row_index ?? a.line_number,
-        type: a.annotation_type as "warning" | "info" | "suggestion",
-        message: a.message,
-        severity: a.severity,
-        category: a.category,
-        sources: a.sources,
-        suggestion: a.suggestion,
-      }));
+      // Map line_number to the actual row index in the diff
+      const mapped = aiAnnotations.map(a => {
+        // If row_index is provided, use it directly; otherwise map from line_number
+        let rowIndex = a.row_index;
+        if (rowIndex === null || rowIndex === undefined) {
+          const fromMap = lineNumToRowIndex.get(a.line_number);
+          const fromClosest = findClosestRow(a.line_number);
+          rowIndex = fromMap ?? fromClosest ?? -1;
+          console.log(`[DiffPanel] Mapping annotation line ${a.line_number}: fromMap=${fromMap}, fromClosest=${fromClosest}, final=${rowIndex}`);
+        }
+        return {
+          lineIndex: rowIndex,
+          type: a.annotation_type as "warning" | "info" | "suggestion",
+          message: a.message,
+          severity: a.severity,
+          category: a.category,
+          sources: a.sources,
+          suggestion: a.suggestion,
+        };
+      });
+      const filtered = mapped.filter(a => a.lineIndex >= 0);
+      console.log("[DiffPanel] effectiveAnnotations after filter:", filtered);
+      return filtered;
     }
     if (!file) return [];
     return generateAIAnnotations(file, diffRows);
-  }, [file, diffRows, aiAnnotations]);
+  }, [file, diffRows, aiAnnotations, lineNumToRowIndex, findClosestRow]);
 
   const annotationsByLine = useMemo(() => {
     const map = new Map<number, AIAnnotation[]>();
@@ -1975,6 +2163,110 @@ function DiffPanel({ file, onAddComment, onEditComment, onDeleteComment, pending
     return map;
   }, [effectiveAnnotations]);
 
+  // Navigation: Compute indices of AI findings
+  const findingIndices = useMemo(() => {
+    return effectiveAnnotations
+      .map(a => a.lineIndex)
+      .filter((v, i, arr) => arr.indexOf(v) === i) // unique
+      .sort((a, b) => a - b);
+  }, [effectiveAnnotations]);
+
+  // Navigation: Compute indices of changes (add/remove lines)
+  const changeIndices = useMemo(() => {
+    return diffRows
+      .filter(row => row.left?.type === "add" || row.left?.type === "remove" ||
+                     row.right?.type === "add" || row.right?.type === "remove")
+      .map(row => row.index);
+  }, [diffRows]);
+
+  // Scroll to a specific row
+  const scrollToRow = useCallback((rowIndex: number) => {
+    const element = containerRef.current?.querySelector(`[data-row-index="${rowIndex}"]`);
+    if (element) {
+      element.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  }, []);
+
+  // Navigation functions
+  const navigateToNextFinding = useCallback(() => {
+    if (findingIndices.length === 0) return;
+    const current = currentNavigationIndex ?? -1;
+    const nextIndex = findingIndices.find(i => i > current) ?? findingIndices[0];
+    setCurrentNavigationIndex(nextIndex);
+    scrollToRow(nextIndex);
+  }, [findingIndices, currentNavigationIndex, scrollToRow]);
+
+  const navigateToPrevFinding = useCallback(() => {
+    if (findingIndices.length === 0) return;
+    const current = currentNavigationIndex ?? diffRows.length;
+    const prevIndex = [...findingIndices].reverse().find(i => i < current) ?? findingIndices[findingIndices.length - 1];
+    setCurrentNavigationIndex(prevIndex);
+    scrollToRow(prevIndex);
+  }, [findingIndices, currentNavigationIndex, scrollToRow, diffRows.length]);
+
+  const navigateToNextChange = useCallback(() => {
+    if (changeIndices.length === 0) return;
+    const current = currentNavigationIndex ?? -1;
+    const nextIndex = changeIndices.find(i => i > current) ?? changeIndices[0];
+    setCurrentNavigationIndex(nextIndex);
+    scrollToRow(nextIndex);
+  }, [changeIndices, currentNavigationIndex, scrollToRow]);
+
+  const navigateToPrevChange = useCallback(() => {
+    if (changeIndices.length === 0) return;
+    const current = currentNavigationIndex ?? diffRows.length;
+    const prevIndex = [...changeIndices].reverse().find(i => i < current) ?? changeIndices[changeIndices.length - 1];
+    setCurrentNavigationIndex(prevIndex);
+    scrollToRow(prevIndex);
+  }, [changeIndices, currentNavigationIndex, scrollToRow, diffRows.length]);
+
+  // Keyboard navigation
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Skip if user is typing in an input/textarea
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+
+      switch (e.key) {
+        case "]":
+          e.preventDefault();
+          navigateToNextFinding();
+          break;
+        case "[":
+          e.preventDefault();
+          navigateToPrevFinding();
+          break;
+        case "n":
+          e.preventDefault();
+          onNavigateNextFile?.();
+          break;
+        case "p":
+          e.preventDefault();
+          onNavigatePrevFile?.();
+          break;
+        case "j":
+          e.preventDefault();
+          navigateToNextChange();
+          break;
+        case "k":
+          e.preventDefault();
+          navigateToPrevChange();
+          break;
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [navigateToNextFinding, navigateToPrevFinding, navigateToNextChange, navigateToPrevChange, onNavigateNextFile, onNavigatePrevFile]);
+
+  // Reset navigation when file changes
+  useEffect(() => {
+    setCurrentNavigationIndex(null);
+    setExpandedSections(new Map());
+    setFileContentCache({ base: null, head: null });
+  }, [file?.filename]);
+
   // Get comments for this file with their original indices
   const fileComments = useMemo(() => {
     return pendingComments
@@ -1982,6 +2274,52 @@ function DiffPanel({ file, onAddComment, onEditComment, onDeleteComment, pending
       .filter((c) => c.file === file?.filename);
   }, [pendingComments, file?.filename]);
 
+  // Must define all hooks before any early returns to satisfy React's Rules of Hooks
+  const handleExpandSection = useCallback(async (rowIndex: number, expandRange?: DiffLine["expandRange"]) => {
+    if (!file || !expandRange) return;
+
+    // Mark as loading
+    setExpandedSections(prev => {
+      const next = new Map(prev);
+      next.set(rowIndex, { rowIndex, lines: [], loading: true, error: null });
+      return next;
+    });
+
+    try {
+      // Use cached content or fetch new
+      let baseLines: string[];
+      if (fileContentCache.base) {
+        baseLines = fileContentCache.base.split("\n");
+      } else {
+        const baseContent = await github.getFileContent(owner, repo, file.filename, baseSha);
+        setFileContentCache(prev => ({ ...prev, base: baseContent }));
+        baseLines = baseContent.split("\n");
+      }
+
+      // Extract the lines we need (expandRange has oldStart, oldEnd which are 1-indexed)
+      const expandedLines = baseLines.slice(expandRange.oldStart - 1, expandRange.oldEnd);
+
+      setExpandedSections(prev => {
+        const next = new Map(prev);
+        next.set(rowIndex, {
+          rowIndex,
+          lines: expandedLines,
+          loading: false,
+          error: null
+        });
+        return next;
+      });
+    } catch (e) {
+      const errorMsg = typeof e === "string" ? e : (e as { message?: string })?.message || "Failed to load content";
+      setExpandedSections(prev => {
+        const next = new Map(prev);
+        next.set(rowIndex, { rowIndex, lines: [], loading: false, error: errorMsg });
+        return next;
+      });
+    }
+  }, [file, owner, repo, baseSha, fileContentCache.base]);
+
+  // Early returns after all hooks
   if (!file) {
     return (
       <div className="flex items-center justify-center h-full text-muted-foreground">
@@ -2050,15 +2388,6 @@ function DiffPanel({ file, onAddComment, onEditComment, onDeleteComment, pending
     if (onDeleteComment) {
       onDeleteComment(originalIndex);
     }
-  };
-
-  const handleExpandSection = (index: number) => {
-    setExpandedSections((prev) => {
-      const next = new Set(prev);
-      next.add(index);
-      return next;
-    });
-    // TODO: Fetch actual file content to show expanded lines
   };
 
   const isLineSelected = (index: number) => {
@@ -2156,7 +2485,7 @@ function DiffPanel({ file, onAddComment, onEditComment, onDeleteComment, pending
     if (line.type === "expandable") {
       return (
         <button
-          onClick={() => handleExpandSection(rowIndex)}
+          onClick={() => handleExpandSection(rowIndex, line.expandRange)}
           className="w-full flex items-center justify-center gap-2 py-1.5 bg-muted/50 hover:bg-muted text-muted-foreground text-xs transition-colors"
         >
           <ChevronDown className="h-3.5 w-3.5" />
@@ -2224,14 +2553,106 @@ function DiffPanel({ file, onAddComment, onEditComment, onDeleteComment, pending
   };
 
   return (
-    <div className="font-mono text-sm h-full" onMouseLeave={() => isDragging && handleMouseUp()}>
-      <div className="flex border-b bg-muted/50 text-xs text-muted-foreground">
+    <div ref={containerRef} className="font-mono text-sm h-full flex flex-col" onMouseLeave={() => isDragging && handleMouseUp()}>
+      {/* Sticky header with navigation toolbar */}
+      <div className="flex border-b bg-muted/50 text-xs text-muted-foreground sticky top-0 z-10 flex-shrink-0">
         <div className="w-6" /> {/* Gutter spacer */}
         <div className="flex-1 px-4 py-1.5 border-r">Original</div>
         <div className="w-6" /> {/* Gutter spacer */}
-        <div className="flex-1 px-4 py-1.5">Modified</div>
+        <div className="flex-1 px-4 py-1.5 flex items-center justify-between">
+          <span>Modified</span>
+          {/* Navigation toolbar */}
+          <div className="flex items-center gap-2 font-sans">
+            {/* AI Findings navigation */}
+            <div className="flex items-center gap-0.5">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-5 w-5"
+                onClick={navigateToPrevFinding}
+                disabled={findingIndices.length === 0}
+                title="Previous AI finding ([)"
+              >
+                <ChevronUp className="h-3 w-3" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-5 w-5"
+                onClick={navigateToNextFinding}
+                disabled={findingIndices.length === 0}
+                title="Next AI finding (])"
+              >
+                <ChevronDown className="h-3 w-3" />
+              </Button>
+              <span className="text-[10px] px-1.5 py-0.5 bg-muted rounded ml-0.5" title="AI findings">
+                <Sparkles className="h-2.5 w-2.5 inline mr-0.5" />
+                {findingIndices.length}
+              </span>
+            </div>
+
+            <div className="w-px h-3 bg-border" />
+
+            {/* Changes navigation */}
+            <div className="flex items-center gap-0.5">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-5 w-5"
+                onClick={navigateToPrevChange}
+                disabled={changeIndices.length === 0}
+                title="Previous change (k)"
+              >
+                <ChevronUp className="h-3 w-3" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-5 w-5"
+                onClick={navigateToNextChange}
+                disabled={changeIndices.length === 0}
+                title="Next change (j)"
+              >
+                <ChevronDown className="h-3 w-3" />
+              </Button>
+              <span className="text-[10px] px-1.5 py-0.5 bg-muted rounded ml-0.5" title="Changed lines">
+                {changeIndices.length}
+              </span>
+            </div>
+
+            <div className="w-px h-3 bg-border" />
+
+            {/* File navigation */}
+            <div className="flex items-center gap-0.5">
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-5 w-5"
+                onClick={onNavigatePrevFile}
+                disabled={!onNavigatePrevFile}
+                title="Previous file (p)"
+              >
+                <ArrowLeft className="h-3 w-3" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-5 w-5"
+                onClick={onNavigateNextFile}
+                disabled={!onNavigateNextFile}
+                title="Next file (n)"
+              >
+                <ArrowLeft className="h-3 w-3 rotate-180" />
+              </Button>
+              <span className="text-[10px] px-1.5 py-0.5 bg-muted rounded ml-0.5" title="Files">
+                <Files className="h-2.5 w-2.5 inline" />
+              </span>
+            </div>
+          </div>
+        </div>
       </div>
-      <div>
+      {/* Scrollable diff content */}
+      <div className="flex-1 overflow-auto">
         {diffRows.map((row) => {
           // Get comments that start on this line
           const lineComments = fileComments.filter((c) => c.line === row.index);
@@ -2239,19 +2660,83 @@ function DiffPanel({ file, onAddComment, onEditComment, onDeleteComment, pending
             commentingLines && row.index === commentingLines.endIndex;
           const isExpandable = row.left?.type === "expandable";
 
-          if (isExpandable && expandedSections.has(row.index)) {
-            // Show placeholder for expanded content
+          if (isExpandable) {
+            const expanded = expandedSections.get(row.index);
+
+            if (expanded?.loading) {
+              return (
+                <div key={row.index} data-row-index={row.index} className="border-b border-border/50 bg-muted/30 p-2 text-center text-xs text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin inline mr-2" />
+                  Loading expanded content...
+                </div>
+              );
+            }
+
+            if (expanded?.error) {
+              return (
+                <div key={row.index} data-row-index={row.index} className="border-b border-border/50 bg-red-50 dark:bg-red-950/30 p-2 text-center text-xs text-red-600 dark:text-red-400">
+                  Failed to load: {expanded.error}
+                  <button
+                    onClick={() => handleExpandSection(row.index, row.left?.expandRange)}
+                    className="ml-2 underline hover:no-underline"
+                  >
+                    Retry
+                  </button>
+                </div>
+              );
+            }
+
+            if (expanded?.lines && expanded.lines.length > 0) {
+              // Render the expanded context lines
+              const expandRange = row.left?.expandRange;
+              return (
+                <div key={row.index} data-row-index={row.index}>
+                  {expanded.lines.map((lineContent, i) => {
+                    const lineNum = (expandRange?.oldStart ?? 1) + i;
+                    return (
+                      <div key={`expanded-${row.index}-${i}`} className="flex border-b border-border/50 bg-yellow-50/50 dark:bg-yellow-950/20">
+                        <div className="w-6 flex-shrink-0" />
+                        <div className="flex-1 border-r border-border/50 min-w-0 flex">
+                          <span className="w-10 px-2 text-right text-muted-foreground select-none text-xs flex items-center justify-end bg-yellow-100/50 dark:bg-yellow-900/30">
+                            {lineNum}
+                          </span>
+                          <pre className="flex-1 px-2 py-0.5 whitespace-pre-wrap break-all">{lineContent || " "}</pre>
+                        </div>
+                        <div className="w-6 flex-shrink-0" />
+                        <div className="flex-1 min-w-0 flex">
+                          <span className="w-10 px-2 text-right text-muted-foreground select-none text-xs flex items-center justify-end bg-yellow-100/50 dark:bg-yellow-900/30">
+                            {lineNum}
+                          </span>
+                          <pre className="flex-1 px-2 py-0.5 whitespace-pre-wrap break-all">{lineContent || " "}</pre>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              );
+            }
+
+            // Not yet expanded - show expand button
             return (
-              <div key={row.index} className="border-b border-border/50 bg-muted/30 p-2 text-center text-xs text-muted-foreground">
-                <Loader2 className="h-4 w-4 animate-spin inline mr-2" />
-                Loading expanded content...
+              <div key={row.index} data-row-index={row.index} className="border-b border-border/50">
+                <button
+                  onClick={() => handleExpandSection(row.index, row.left?.expandRange)}
+                  className="w-full flex items-center justify-center gap-2 py-2 bg-muted/30 hover:bg-muted/50 text-muted-foreground text-xs transition-colors cursor-pointer"
+                >
+                  <ChevronDown className="h-3.5 w-3.5" />
+                  <span>{row.left?.content || "Expand hidden lines"}</span>
+                  <ChevronDown className="h-3.5 w-3.5" />
+                </button>
               </div>
             );
           }
 
           return (
-            <div key={row.index}>
-              <div className="flex border-b border-border/50 group/row">
+            <div key={row.index} data-row-index={row.index}>
+              <div className={cn(
+                "flex border-b border-border/50 group/row",
+                currentNavigationIndex === row.index && "ring-2 ring-inset ring-primary/50"
+              )}>
                 {/* Left gutter */}
                 {renderGutter(row, "left")}
 

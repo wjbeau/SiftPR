@@ -21,6 +21,21 @@ pub enum AppError {
     #[error("AI provider error: {0}")]
     AIProvider(String),
 
+    #[error("Tool execution error: {0}")]
+    ToolExecution(String),
+
+    #[error("MCP error: {0}")]
+    MCP(String),
+
+    #[error("Indexing error: {0}")]
+    Indexing(String),
+
+    #[error("Embedding error: {0}")]
+    Embedding(String),
+
+    #[error("Parser error: {0}")]
+    Parser(String),
+
     #[error("Not found: {0}")]
     NotFound(String),
 

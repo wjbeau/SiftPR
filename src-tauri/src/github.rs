@@ -4,7 +4,7 @@ use crate::error::{AppError, AppResult};
 
 // GitHub OAuth configuration
 // In production, these should be loaded from a config file or environment
-const GITHUB_CLIENT_ID: &str = "Iv23liC6bORxIX5AC6u1H";
+const GITHUB_CLIENT_ID: &str = "Iv23liC6bORxIX5AC6u1";
 const GITHUB_CLIENT_SECRET: &str = "e05ae92c595715c3c3660f19699abcea53158219";
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -98,9 +98,26 @@ pub struct GitHubFile {
     pub patch: Option<String>,
 }
 
+/// Response from GitHub OAuth token endpoint
 #[derive(Debug, Deserialize)]
 struct TokenResponse {
     access_token: String,
+    token_type: Option<String>,
+    scope: Option<String>,
+    refresh_token: Option<String>,
+    expires_in: Option<i64>,
+    refresh_token_expires_in: Option<i64>,
+}
+
+/// Token data returned to the application
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OAuthTokens {
+    pub access_token: String,
+    pub refresh_token: Option<String>,
+    /// Unix timestamp when access token expires (None if non-expiring)
+    pub expires_at: Option<i64>,
+    /// Unix timestamp when refresh token expires (None if non-expiring)
+    pub refresh_token_expires_at: Option<i64>,
 }
 
 pub struct GitHubClient {
@@ -126,7 +143,7 @@ impl GitHubClient {
     }
 
     /// Exchange OAuth code for access token
-    pub async fn exchange_code(&self, code: &str) -> AppResult<String> {
+    pub async fn exchange_code(&self, code: &str) -> AppResult<OAuthTokens> {
         let response = self
             .client
             .post("https://github.com/login/oauth/access_token")
@@ -139,8 +156,61 @@ impl GitHubClient {
             .send()
             .await?;
 
+        if !response.status().is_success() {
+            return Err(AppError::GitHub(format!(
+                "Failed to exchange code: {}",
+                response.status()
+            )));
+        }
+
         let token_data: TokenResponse = response.json().await?;
-        Ok(token_data.access_token)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        Ok(OAuthTokens {
+            access_token: token_data.access_token,
+            refresh_token: token_data.refresh_token,
+            expires_at: token_data.expires_in.map(|secs| now + secs),
+            refresh_token_expires_at: token_data.refresh_token_expires_in.map(|secs| now + secs),
+        })
+    }
+
+    /// Refresh an expired access token using a refresh token
+    pub async fn refresh_token(&self, refresh_token: &str) -> AppResult<OAuthTokens> {
+        let response = self
+            .client
+            .post("https://github.com/login/oauth/access_token")
+            .header("Accept", "application/json")
+            .json(&serde_json::json!({
+                "client_id": GITHUB_CLIENT_ID,
+                "client_secret": GITHUB_CLIENT_SECRET,
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token
+            }))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(AppError::GitHub(format!(
+                "Failed to refresh token: {}",
+                response.status()
+            )));
+        }
+
+        let token_data: TokenResponse = response.json().await?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        Ok(OAuthTokens {
+            access_token: token_data.access_token,
+            refresh_token: token_data.refresh_token,
+            expires_at: token_data.expires_in.map(|secs| now + secs),
+            refresh_token_expires_at: token_data.refresh_token_expires_in.map(|secs| now + secs),
+        })
     }
 
     /// Get the authenticated user's info
