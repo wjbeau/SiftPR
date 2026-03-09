@@ -8,6 +8,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn, formatDistanceToNow } from "@/lib/utils";
+import { CommentToolbar } from "@/components/CommentToolbar";
 
 type ViewMode = "all" | "since_review";
 
@@ -2053,6 +2054,8 @@ function DiffPanel({ file, owner, repo, baseSha, headSha: _headSha, onAddComment
   // Navigation state
   const [currentNavigationIndex, setCurrentNavigationIndex] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
+  const commentTextareaRef = useRef<HTMLTextAreaElement>(null);
+  const editTextareaRef = useRef<HTMLTextAreaElement>(null);
 
   // File content cache for expand
   const [fileContentCache, setFileContentCache] = useState<{ base: string | null; head: string | null }>({ base: null, head: null });
@@ -2273,6 +2276,24 @@ function DiffPanel({ file, owner, repo, baseSha, headSha: _headSha, onAddComment
       .map((c, index) => ({ ...c, originalIndex: index }))
       .filter((c) => c.file === file?.filename);
   }, [pendingComments, file?.filename]);
+
+  // Get the selected code content for suggested changes
+  const selectedCodeForSuggestion = useMemo(() => {
+    if (!commentingLines || !diffRows.length) return undefined;
+    const lines: string[] = [];
+    for (let i = commentingLines.startIndex; i <= commentingLines.endIndex; i++) {
+      const row = diffRows[i];
+      if (row?.right?.content) {
+        // Remove the leading + or - or space from the diff
+        const content = row.right.content;
+        const cleanContent = content.startsWith("+") || content.startsWith("-") || content.startsWith(" ")
+          ? content.substring(1)
+          : content;
+        lines.push(cleanContent);
+      }
+    }
+    return lines.length > 0 ? lines.join("\n") : undefined;
+  }, [commentingLines, diffRows]);
 
   // Must define all hooks before any early returns to satisfy React's Rules of Hooks
   const handleExpandSection = useCallback(async (rowIndex: number, expandRange?: DiffLine["expandRange"]) => {
@@ -2790,14 +2811,23 @@ function DiffPanel({ file, owner, repo, baseSha, headSha: _headSha, onAddComment
                       <X className="h-4 w-4 text-blue-500" />
                     </button>
                   </div>
-                  <textarea
-                    value={commentText}
-                    onChange={(e) => setCommentText(e.target.value)}
-                    placeholder="Write a comment..."
-                    className="w-full p-2 text-sm bg-background border rounded resize-none font-sans"
-                    rows={3}
-                    autoFocus
-                  />
+                  <div className="border rounded overflow-hidden">
+                    <CommentToolbar
+                      textareaRef={commentTextareaRef}
+                      value={commentText}
+                      onChange={setCommentText}
+                      selectedCode={selectedCodeForSuggestion}
+                    />
+                    <textarea
+                      ref={commentTextareaRef}
+                      value={commentText}
+                      onChange={(e) => setCommentText(e.target.value)}
+                      placeholder="Write a comment... Use the toolbar above for formatting or type markdown directly."
+                      className="w-full p-2 text-sm bg-background resize-none font-sans border-0 focus:ring-0 focus:outline-none"
+                      rows={4}
+                      autoFocus
+                    />
+                  </div>
                   <div className="flex justify-end gap-2 mt-2">
                     <Button
                       variant="ghost"
@@ -2865,13 +2895,21 @@ function DiffPanel({ file, owner, repo, baseSha, headSha: _headSha, onAddComment
 
                     {isEditing ? (
                       <>
-                        <textarea
-                          value={editingCommentText}
-                          onChange={(e) => setEditingCommentText(e.target.value)}
-                          className="w-full p-2 text-sm bg-background border rounded resize-none font-sans"
-                          rows={3}
-                          autoFocus
-                        />
+                        <div className="border rounded overflow-hidden">
+                          <CommentToolbar
+                            textareaRef={editTextareaRef}
+                            value={editingCommentText}
+                            onChange={setEditingCommentText}
+                          />
+                          <textarea
+                            ref={editTextareaRef}
+                            value={editingCommentText}
+                            onChange={(e) => setEditingCommentText(e.target.value)}
+                            className="w-full p-2 text-sm bg-background resize-none font-sans border-0 focus:ring-0 focus:outline-none"
+                            rows={4}
+                            autoFocus
+                          />
+                        </div>
                         <div className="flex justify-end gap-2 mt-2">
                           <Button variant="ghost" size="sm" onClick={handleCancelEdit}>
                             Cancel
