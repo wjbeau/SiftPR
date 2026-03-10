@@ -69,6 +69,10 @@ impl Database {
             "ALTER TABLE users ADD COLUMN refresh_token_expires_at INTEGER",
             [],
         );
+        let _ = conn.execute(
+            "ALTER TABLE linked_repos ADD COLUMN ai_summary TEXT",
+            [],
+        );
 
         conn.execute_batch(
             r#"
@@ -712,7 +716,7 @@ impl Database {
     pub fn get_linked_repos(&self, user_id: &str) -> AppResult<Vec<LinkedRepo>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, user_id, repo_full_name, local_path, last_analyzed_commit, profile_data, created_at, updated_at
+            "SELECT id, user_id, repo_full_name, local_path, last_analyzed_commit, profile_data, created_at, updated_at, ai_summary
              FROM linked_repos WHERE user_id = ?1"
         )?;
 
@@ -726,6 +730,7 @@ impl Database {
                 local_path: row.get(3)?,
                 last_analyzed_commit: row.get(4)?,
                 profile_data,
+                ai_summary: row.get(8)?,
                 created_at: row.get(6)?,
                 updated_at: row.get(7)?,
             })
@@ -737,7 +742,7 @@ impl Database {
     pub fn get_linked_repo(&self, user_id: &str, repo_full_name: &str) -> AppResult<Option<LinkedRepo>> {
         let conn = self.conn.lock().unwrap();
         let result = conn.query_row(
-            "SELECT id, user_id, repo_full_name, local_path, last_analyzed_commit, profile_data, created_at, updated_at
+            "SELECT id, user_id, repo_full_name, local_path, last_analyzed_commit, profile_data, created_at, updated_at, ai_summary
              FROM linked_repos WHERE user_id = ?1 AND repo_full_name = ?2",
             params![user_id, repo_full_name],
             |row| {
@@ -750,6 +755,7 @@ impl Database {
                     local_path: row.get(3)?,
                     last_analyzed_commit: row.get(4)?,
                     profile_data,
+                    ai_summary: row.get(8)?,
                     created_at: row.get(6)?,
                     updated_at: row.get(7)?,
                 })
@@ -782,6 +788,7 @@ impl Database {
             local_path: local_path.to_string(),
             last_analyzed_commit: None,
             profile_data: None,
+            ai_summary: None,
             created_at: now.clone(),
             updated_at: now,
         })
@@ -808,6 +815,21 @@ impl Database {
             params![commit_sha, profile_json, now, user_id, repo_full_name],
         )?;
 
+        Ok(())
+    }
+
+    pub fn update_repo_ai_summary(
+        &self,
+        user_id: &str,
+        repo_full_name: &str,
+        ai_summary: &str,
+    ) -> AppResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE linked_repos SET ai_summary = ?1, updated_at = ?2 WHERE user_id = ?3 AND repo_full_name = ?4",
+            params![ai_summary, now, user_id, repo_full_name],
+        )?;
         Ok(())
     }
 
@@ -1334,6 +1356,34 @@ impl Database {
         Ok(())
     }
 
+    /// Delete chunks for specific files (used for incremental re-indexing)
+    pub fn delete_chunks_for_files(&self, index_id: &str, file_paths: &[String]) -> AppResult<u32> {
+        if file_paths.is_empty() {
+            return Ok(0);
+        }
+        let conn = self.conn.lock().unwrap();
+        let mut deleted = 0u32;
+        for path in file_paths {
+            let count = conn.execute(
+                "DELETE FROM chunk_metadata WHERE index_id = ?1 AND file_path = ?2",
+                params![index_id, path],
+            )?;
+            deleted += count as u32;
+        }
+        Ok(deleted)
+    }
+
+    /// Count existing chunks for an index
+    pub fn count_chunks_for_index(&self, index_id: &str) -> AppResult<u32> {
+        let conn = self.conn.lock().unwrap();
+        let count: u32 = conn.query_row(
+            "SELECT COUNT(*) FROM chunk_metadata WHERE index_id = ?1",
+            params![index_id],
+            |row| row.get(0),
+        )?;
+        Ok(count)
+    }
+
     pub fn insert_chunk(
         &self,
         index_id: &str,
@@ -1645,6 +1695,7 @@ pub struct LinkedRepo {
     pub local_path: String,
     pub last_analyzed_commit: Option<String>,
     pub profile_data: Option<CodebaseProfile>,
+    pub ai_summary: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -1655,6 +1706,8 @@ pub struct CodebaseProfile {
     pub file_count: u32,
     pub language_breakdown: std::collections::HashMap<String, u32>,
     pub config_files: Vec<ConfigFile>,
+    #[serde(default)]
+    pub documentation_files: Vec<ConfigFile>,
     pub patterns: CodebasePatterns,
     pub style_summary: StyleSummary,
 }

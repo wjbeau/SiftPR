@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
-import { codebase, github, indexing, CodebaseIndexStatus } from "@/lib/api";
+import { agents, codebase, github, indexing, CodebaseIndexStatus } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -28,14 +28,13 @@ import {
   XCircle,
   FileCode,
   Layers,
+  ChevronDown,
+  ChevronRight,
+  BookOpen,
+  Braces,
+  Settings2,
 } from "lucide-react";
 import { formatDistanceToNow } from "@/lib/utils";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import {
   Tabs,
   TabsContent,
@@ -51,6 +50,7 @@ export function Repositories() {
   const [cloneDestPath, setCloneDestPath] = useState("");
   const [analyzingRepo, setAnalyzingRepo] = useState<string | null>(null);
   const [indexingRepo, setIndexingRepo] = useState<string | null>(null);
+  const [expandedProfile, setExpandedProfile] = useState<string | null>(null);
 
   // GitHub repos query
   const { data: githubRepos } = useQuery({
@@ -91,6 +91,12 @@ export function Repositories() {
     },
   });
 
+  // Check if embedding-capable provider is configured
+  const { data: embeddingCapability } = useQuery({
+    queryKey: ["agents", "embedding-capability"],
+    queryFn: () => agents.getEmbeddingCapability(),
+  });
+
   const linkRepoMutation = useMutation({
     mutationFn: (data: { repoFullName: string; localPath: string }) =>
       codebase.linkRepo(data.repoFullName, data.localPath),
@@ -115,6 +121,7 @@ export function Repositories() {
       setAnalyzingRepo(null);
     },
     onError: () => {
+      queryClient.invalidateQueries({ queryKey: ["codebase", "linked"] });
       setAnalyzingRepo(null);
     },
   });
@@ -122,7 +129,8 @@ export function Repositories() {
   const [indexError, setIndexError] = useState<string | null>(null);
 
   const indexRepoMutation = useMutation({
-    mutationFn: (repoFullName: string) => indexing.start(repoFullName),
+    mutationFn: ({ repoFullName, withEmbeddings }: { repoFullName: string; withEmbeddings: boolean }) =>
+      indexing.start(repoFullName, withEmbeddings),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["codebase", "index-status"] });
       setIndexError(null);
@@ -177,7 +185,7 @@ export function Repositories() {
   const handleIndexRepo = (repoFullName: string) => {
     setIndexingRepo(repoFullName);
     setIndexError(null);
-    indexRepoMutation.mutate(repoFullName);
+    indexRepoMutation.mutate({ repoFullName, withEmbeddings: true });
     // Trigger immediate refetch so polling starts right away
     setTimeout(() => {
       queryClient.invalidateQueries({ queryKey: ["codebase", "index-status"] });
@@ -328,51 +336,236 @@ export function Repositories() {
                   </div>
 
                   {/* Analysis Status Row */}
-                  <div className="flex items-center justify-between text-sm">
-                    <div className="text-muted-foreground">
-                      {repo.last_analyzed_commit ? (
-                        <span className="flex items-center gap-1">
-                          <Clock className="h-3 w-3" />
-                          Last analyzed: {repo.last_analyzed_commit.slice(0, 7)}
-                          {repo.profile_data && (
-                            <span className="ml-2 text-xs bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200 px-2 py-0.5 rounded">
-                              {repo.profile_data.file_count} files
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between text-sm">
+                      <div className="text-muted-foreground">
+                        {repo.last_analyzed_commit ? (
+                          <span className="flex items-center gap-1">
+                            <CheckCircle className="h-3.5 w-3.5 text-green-600 dark:text-green-400" />
+                            <span className="text-foreground font-medium">Analyzed</span>
+                            <span className="ml-1">at {repo.last_analyzed_commit.slice(0, 7)}</span>
+                          </span>
+                        ) : (
+                          <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
+                            <AlertTriangle className="h-3.5 w-3.5" />
+                            Not analyzed yet
+                          </span>
+                        )}
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={() => handleAnalyzeRepo(repo.repo_full_name)}
+                        disabled={analyzingRepo === repo.repo_full_name}
+                      >
+                        {analyzingRepo === repo.repo_full_name ? (
+                          <>
+                            <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                            Analyzing...
+                          </>
+                        ) : (
+                          <>
+                            <RefreshCw className="h-4 w-4 mr-2" />
+                            {repo.last_analyzed_commit ? "Re-analyze" : "Analyze"}
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                    {repo.profile_data && (
+                      <div className="pl-6 space-y-1.5">
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                          <span className="flex items-center gap-1">
+                            <FileCode className="h-3 w-3" />
+                            {repo.profile_data.file_count} files
+                          </span>
+                          {repo.profile_data.language_breakdown && Object.keys(repo.profile_data.language_breakdown).length > 0 && (() => {
+                            const langs = Object.keys(repo.profile_data.language_breakdown);
+                            return (
+                              <span className="flex items-center gap-1">
+                                <Layers className="h-3 w-3" />
+                                {langs.slice(0, 4).join(", ")}
+                                {langs.length > 4 && ` +${langs.length - 4}`}
+                              </span>
+                            );
+                          })()}
+                          {repo.profile_data.documentation_files && repo.profile_data.documentation_files.length > 0 && (
+                            <span className="text-green-600 dark:text-green-400">
+                              {repo.profile_data.documentation_files.length} doc{repo.profile_data.documentation_files.length !== 1 ? "s" : ""} found
                             </span>
                           )}
-                        </span>
-                      ) : (
-                        <span className="text-amber-600 dark:text-amber-400">
-                          Not analyzed yet
-                        </span>
-                      )}
-                    </div>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => handleAnalyzeRepo(repo.repo_full_name)}
-                      disabled={analyzingRepo === repo.repo_full_name}
-                    >
-                      {analyzingRepo === repo.repo_full_name ? (
-                        <>
-                          <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                          Analyzing...
-                        </>
-                      ) : (
-                        <>
-                          <RefreshCw className="h-4 w-4 mr-2" />
-                          {repo.last_analyzed_commit ? "Re-analyze" : "Analyze"}
-                        </>
-                      )}
-                    </Button>
+                          <button
+                            onClick={() => setExpandedProfile(
+                              expandedProfile === repo.repo_full_name ? null : repo.repo_full_name
+                            )}
+                            className="flex items-center gap-0.5 text-blue-600 dark:text-blue-400 hover:underline"
+                          >
+                            {expandedProfile === repo.repo_full_name ? (
+                              <ChevronDown className="h-3 w-3" />
+                            ) : (
+                              <ChevronRight className="h-3 w-3" />
+                            )}
+                            View details
+                          </button>
+                        </div>
+
+                        {/* Expanded profile details */}
+                        {expandedProfile === repo.repo_full_name && repo.profile_data && (
+                          <div className="mt-2 p-3 bg-muted/50 rounded-md space-y-3 text-xs">
+                            {/* AI Summary */}
+                            {repo.ai_summary ? (
+                              <div>
+                                <div className="font-medium text-foreground flex items-center gap-1 mb-1.5">
+                                  <Layers className="h-3 w-3 text-violet-500" />
+                                  AI Profiler Summary
+                                </div>
+                                <div className="prose prose-xs dark:prose-invert max-w-none text-xs text-muted-foreground [&_h1]:text-sm [&_h1]:font-semibold [&_h1]:text-foreground [&_h1]:mt-2 [&_h1]:mb-1 [&_h2]:text-xs [&_h2]:font-semibold [&_h2]:text-foreground [&_h2]:mt-2 [&_h2]:mb-1 [&_h3]:text-xs [&_h3]:font-medium [&_h3]:text-foreground [&_h3]:mt-1.5 [&_h3]:mb-0.5 [&_p]:my-1 [&_ul]:my-1 [&_li]:my-0.5 [&_strong]:text-foreground whitespace-pre-wrap">
+                                  {repo.ai_summary}
+                                </div>
+                              </div>
+                            ) : analyzingRepo !== repo.repo_full_name && (
+                              <div className="text-muted-foreground italic">
+                                No AI summary yet. Click "Re-analyze" to generate one (requires an AI provider).
+                              </div>
+                            )}
+
+                            <div className="border-t pt-2" />
+
+                            {/* Languages */}
+                            {repo.profile_data.language_breakdown && Object.keys(repo.profile_data.language_breakdown).length > 0 && (
+                              <div>
+                                <div className="font-medium text-foreground flex items-center gap-1 mb-1">
+                                  <Layers className="h-3 w-3" />
+                                  Languages
+                                </div>
+                                <div className="flex flex-wrap gap-1.5">
+                                  {Object.entries(repo.profile_data.language_breakdown)
+                                    .sort(([, a], [, b]) => b - a)
+                                    .map(([lang, count]) => (
+                                      <span key={lang} className="px-1.5 py-0.5 bg-background border rounded text-muted-foreground">
+                                        {lang} <span className="text-foreground font-medium">{count}</span>
+                                      </span>
+                                    ))}
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Patterns */}
+                            {repo.profile_data.patterns && (
+                              <div>
+                                <div className="font-medium text-foreground flex items-center gap-1 mb-1">
+                                  <Braces className="h-3 w-3" />
+                                  Detected Patterns
+                                </div>
+                                <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-muted-foreground">
+                                  {repo.profile_data.patterns.file_organization && (
+                                    <div>Structure: <span className="text-foreground">{repo.profile_data.patterns.file_organization}</span></div>
+                                  )}
+                                  {repo.profile_data.patterns.import_style && (
+                                    <div>Imports: <span className="text-foreground">{repo.profile_data.patterns.import_style}</span></div>
+                                  )}
+                                  {repo.profile_data.patterns.error_handling_pattern && (
+                                    <div>Errors: <span className="text-foreground">{repo.profile_data.patterns.error_handling_pattern}</span></div>
+                                  )}
+                                  {typeof repo.profile_data.patterns.naming_conventions === "string"
+                                    ? repo.profile_data.patterns.naming_conventions && (
+                                        <div>Naming: <span className="text-foreground">{repo.profile_data.patterns.naming_conventions}</span></div>
+                                      )
+                                    : repo.profile_data.patterns.naming_conventions?.functions && (
+                                        <div>Naming: <span className="text-foreground">{repo.profile_data.patterns.naming_conventions.functions}</span></div>
+                                      )}
+                                </div>
+                                {repo.profile_data.patterns.common_abstractions && repo.profile_data.patterns.common_abstractions.length > 0 && (
+                                  <div className="mt-1 text-muted-foreground">
+                                    Abstractions: <span className="text-foreground">{repo.profile_data.patterns.common_abstractions.join(", ")}</span>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            {/* Style */}
+                            {repo.profile_data.style_summary && (
+                              <div>
+                                <div className="font-medium text-foreground flex items-center gap-1 mb-1">
+                                  <Settings2 className="h-3 w-3" />
+                                  Code Style
+                                </div>
+                                <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-muted-foreground">
+                                  {repo.profile_data.style_summary.indentation && (
+                                    <div>Indent: <span className="text-foreground">{repo.profile_data.style_summary.indentation}</span></div>
+                                  )}
+                                  {repo.profile_data.style_summary.quote_style && (
+                                    <div>Quotes: <span className="text-foreground">{repo.profile_data.style_summary.quote_style}</span></div>
+                                  )}
+                                  {repo.profile_data.style_summary.documentation_style && (
+                                    <div>Docs: <span className="text-foreground">{repo.profile_data.style_summary.documentation_style}</span></div>
+                                  )}
+                                  {repo.profile_data.style_summary.typical_file_length > 0 && (
+                                    <div>Avg file: <span className="text-foreground">{repo.profile_data.style_summary.typical_file_length} lines</span></div>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Documentation files */}
+                            {repo.profile_data.documentation_files && repo.profile_data.documentation_files.length > 0 && (
+                              <div>
+                                <div className="font-medium text-foreground flex items-center gap-1 mb-1">
+                                  <BookOpen className="h-3 w-3" />
+                                  Documentation Ingested
+                                </div>
+                                <div className="flex flex-wrap gap-1.5">
+                                  {repo.profile_data.documentation_files.map((doc) => (
+                                    <span key={doc.path} className="px-1.5 py-0.5 bg-green-100 dark:bg-green-950 text-green-800 dark:text-green-200 border border-green-200 dark:border-green-800 rounded">
+                                      {doc.path}
+                                    </span>
+                                  ))}
+                                </div>
+                                <p className="mt-1 text-muted-foreground">
+                                  Content from these files is included in AI review context.
+                                </p>
+                              </div>
+                            )}
+
+                            {/* Config files */}
+                            {repo.profile_data.config_files && repo.profile_data.config_files.length > 0 && (
+                              <div>
+                                <div className="font-medium text-foreground flex items-center gap-1 mb-1">
+                                  <Settings2 className="h-3 w-3" />
+                                  Config Files Detected
+                                </div>
+                                <div className="flex flex-wrap gap-1.5">
+                                  {repo.profile_data.config_files.map((cfg) => (
+                                    <span key={cfg.path} className="px-1.5 py-0.5 bg-background border rounded text-muted-foreground">
+                                      {cfg.path}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {analyzingRepo === repo.repo_full_name && (
+                      <p className="pl-6 text-xs text-muted-foreground">
+                        Scanning files and documentation... AI profiler will run if a provider is configured.
+                      </p>
+                    )}
+                    {!repo.last_analyzed_commit && analyzingRepo !== repo.repo_full_name && (
+                      <p className="pl-6 text-xs text-muted-foreground">
+                        Profiles your codebase structure, languages, and documentation. If an AI provider is configured, also generates a reviewer's reference guide.
+                      </p>
+                    )}
                   </div>
 
-                  {/* Index Status Row */}
+                  {/* Generate Embeddings Row */}
                   {(() => {
                     const { label, color, isStale, progress } = getIndexStatusInfo(repo.repo_full_name);
                     const indexStatus = indexStatusQueries.data?.[repo.repo_full_name];
                     const isComplete = indexStatus?.index_status === "complete";
                     const isFailed = indexStatus?.index_status === "failed";
                     const isIndexing = !!progress;
+                    const hasEmbeddings = embeddingCapability?.available;
 
                     return (
                       <div className="border-t pt-3 space-y-2">
@@ -389,43 +582,43 @@ export function Repositories() {
                             )}
                             <span className={color}>{label}</span>
                           </div>
-                          <TooltipProvider>
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <Button
-                                  variant="outline"
-                                  size="sm"
-                                  onClick={() => handleIndexRepo(repo.repo_full_name)}
-                                  disabled={indexingRepo === repo.repo_full_name || !repo.last_analyzed_commit}
-                                >
-                                  {indexingRepo === repo.repo_full_name ? (
-                                    <>
-                                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                                      Indexing...
-                                    </>
-                                  ) : (
-                                    <>
-                                      <Database className="h-4 w-4 mr-2" />
-                                      {isComplete ? "Re-index" : "Index Repo"}
-                                    </>
-                                  )}
-                                </Button>
-                              </TooltipTrigger>
-                              <TooltipContent side="left" className="max-w-xs">
-                                <p className="font-medium mb-1">Semantic Code Indexing</p>
-                                <p className="text-xs text-muted-foreground">
-                                  Creates a searchable vector index of your codebase, enabling AI agents
-                                  to find similar code patterns and detect inconsistencies during PR review.
-                                </p>
-                                {!repo.last_analyzed_commit && (
-                                  <p className="text-xs text-amber-600 mt-1">
-                                    Analyze the repository first before indexing.
-                                  </p>
-                                )}
-                              </TooltipContent>
-                            </Tooltip>
-                          </TooltipProvider>
+                          {hasEmbeddings && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              onClick={() => handleIndexRepo(repo.repo_full_name)}
+                              disabled={indexingRepo === repo.repo_full_name || !repo.last_analyzed_commit}
+                            >
+                              {indexingRepo === repo.repo_full_name ? (
+                                <>
+                                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                  Generating...
+                                </>
+                              ) : (
+                                <>
+                                  <Database className="h-4 w-4 mr-2" />
+                                  {isComplete ? "Regenerate" : "Generate Embeddings"}
+                                </>
+                              )}
+                            </Button>
+                          )}
                         </div>
+
+                        {/* Explanatory copy when no embeddings exist yet */}
+                        {!isComplete && !isIndexing && !isFailed && (
+                          <p className="pl-6 text-xs text-muted-foreground">
+                            {hasEmbeddings ? (
+                              <>
+                                Generates semantic embeddings so AI agents can search your codebase by meaning, not just keywords.
+                                Improves review quality but uses API tokens
+                                {embeddingCapability?.provider && <> via {embeddingCapability.provider}</>}.
+                                {!repo.last_analyzed_commit && " Analyze the repository first."}
+                              </>
+                            ) : (
+                              "Add an OpenAI or Google API key in Providers to enable semantic embeddings."
+                            )}
+                          </p>
+                        )}
 
                         {/* Progress bar during indexing */}
                         {isIndexing && (
@@ -459,7 +652,7 @@ export function Repositories() {
                             {indexStatus.files_total > 0 && (
                               <span className="flex items-center gap-1">
                                 <FileCode className="h-3 w-3" />
-                                {indexStatus.files_total} files parsed
+                                {indexStatus.files_total} files
                               </span>
                             )}
                             {indexStatus.last_indexed_commit && (
@@ -487,12 +680,12 @@ export function Repositories() {
                         {/* Stale warning */}
                         {isStale && (
                           <p className="pl-6 text-xs text-amber-600 dark:text-amber-400">
-                            Index was built on a different commit than the latest analysis. Re-index for best results.
+                            Embeddings were built on a different commit than the latest analysis. Regenerate for best results.
                           </p>
                         )}
 
                         {/* Mutation error (error from the Tauri command itself) */}
-                        {indexError && repo.repo_full_name === (indexingRepo ?? indexRepoMutation.variables) && (
+                        {indexError && repo.repo_full_name === (indexingRepo ?? indexRepoMutation.variables?.repoFullName) && (
                           <p className="pl-6 text-xs text-destructive" title={indexError}>
                             Error: {indexError.length > 120 ? indexError.slice(0, 120) + "..." : indexError}
                           </p>

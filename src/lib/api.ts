@@ -350,6 +350,7 @@ export interface CodebaseProfile {
   file_count: number;
   language_breakdown: Record<string, number>;
   config_files: ConfigFile[];
+  documentation_files?: ConfigFile[];
   patterns: CodebasePatterns;
   style_summary: StyleSummary;
 }
@@ -361,6 +362,7 @@ export interface LinkedRepo {
   local_path: string;
   last_analyzed_commit: string | null;
   profile_data: CodebaseProfile | null;
+  ai_summary: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -602,8 +604,8 @@ export interface SemanticSearchResult {
 
 // Codebase Indexing API
 export const indexing = {
-  start: (repoFullName: string) =>
-    invoke<void>("codebase_index_start", { repoFullName }),
+  start: (repoFullName: string, withEmbeddings?: boolean) =>
+    invoke<void>("codebase_index_start", { repoFullName, withEmbeddings }),
   getStatus: (repoFullName: string) =>
     invoke<CodebaseIndexStatus | null>("codebase_index_status", { repoFullName }),
   semanticSearch: (repoFullName: string, query: string, limit?: number, threshold?: number) =>

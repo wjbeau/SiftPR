@@ -1,6 +1,9 @@
 # SiftPR
 
-AI-powered desktop PR review tool that helps you identify important changes and organize your code review workflow.
+AI-powered desktop PR review tool that helps you identify important changes and organize your code review cycles.  It will also provide additional
+suggestions and insights.
+
+Note this thing has been vibe coded to the max, with little or no attention paid to code quality or correctness. Use in full knowledge thereof.
 
 ## Features
 
@@ -28,7 +31,7 @@ AI-powered desktop PR review tool that helps you identify important changes and 
 
 2. **Set up GitHub OAuth**
    - Create a GitHub OAuth App at https://github.com/settings/developers
-   - Set Callback URL to `reviewboss://oauth/callback`
+   - Set Callback URL to `siftpr://oauth/callback`
    - Update credentials in `src-tauri/src/github.rs`
 
 3. **Start development**
@@ -107,9 +110,13 @@ Output: `src-tauri/target/release/bundle/`
 - AI API keys encrypted with AES-256-GCM
 - No data sent to external servers (except GitHub API and your chosen AI provider)
 
+## Disclaimer
+
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR ITS USE. YOU USE THIS SOFTWARE ENTIRELY AT YOUR OWN RISK.
+
 ## License
 
-MIT
+This project is licensed under the MIT License. See [LICENSE.md](LICENSE.md) for details.
 
 ## TODO
 

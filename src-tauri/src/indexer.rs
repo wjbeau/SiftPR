@@ -23,7 +23,7 @@ pub struct IndexingResult {
 /// Batch size for embedding API calls
 const EMBEDDING_BATCH_SIZE: usize = 50;
 
-/// Index a repository
+/// Index a repository (supports incremental indexing when previous index exists)
 pub async fn index_repository(
     db: &Database,
     user_id: &str,
@@ -42,36 +42,73 @@ pub async fn index_repository(
         )));
     }
 
-    // Get or create index
+    // Get existing index (for incremental) or create new one
     let dimensions = embeddings::get_dimensions(embedding_provider, embedding_model);
-    let index = db.create_codebase_index(
-        user_id,
-        repo_full_name,
-        local_path,
-        embedding_provider,
-        embedding_model,
-        dimensions as u32,
-    )?;
+    let existing = db.get_codebase_index(user_id, repo_full_name)?;
+    let index = if let Some(existing) = existing {
+        existing
+    } else {
+        db.create_codebase_index(
+            user_id,
+            repo_full_name,
+            local_path,
+            embedding_provider,
+            embedding_model,
+            dimensions as u32,
+        )?
+    };
 
     // Update status to indexing
     db.update_index_status(&index.id, IndexStatus::Indexing, None)?;
 
-    // Clear existing chunks
-    db.clear_chunks_for_index(&index.id)?;
+    let current_commit = crate::codebase::get_head_commit(local_path)
+        .unwrap_or_else(|_| "unknown".to_string());
 
-    // Collect all source files
-    let files = collect_source_files(path)?;
-    let files_total = files.len() as u32;
+    // Determine if we can do incremental indexing
+    let incremental = can_do_incremental(
+        &index,
+        local_path,
+        &current_commit,
+        embedding_provider,
+        embedding_model,
+    );
+    let is_incremental = incremental.is_some();
 
-    // Store files_total and reset progress
+    let files_to_parse = if let Some((ref from_commit, ref changed, ref deleted)) = incremental {
+        println!(
+            "[Index] Incremental update: {} changed, {} deleted files since {}",
+            changed.len(),
+            deleted.len(),
+            &from_commit[..7.min(from_commit.len())]
+        );
+
+        // Remove chunks for changed + deleted files
+        let all_removed: Vec<String> = changed.iter().chain(deleted.iter()).cloned().collect();
+        let removed_count = db.delete_chunks_for_files(&index.id, &all_removed)?;
+        println!("[Index] Removed {} old chunks for changed/deleted files", removed_count);
+
+        // Convert changed relative paths to absolute paths, filter to parseable files
+        changed
+            .iter()
+            .map(|f| path.join(f))
+            .filter(|p| p.is_file() && parser::is_parseable_file(p))
+            .collect::<Vec<std::path::PathBuf>>()
+    } else {
+        println!("[Index] Full index (no previous index or provider/model changed)");
+        // Full re-index: clear everything
+        db.clear_chunks_for_index(&index.id)?;
+        collect_source_files(path)?
+    };
+
+    let files_total = files_to_parse.len() as u32;
     db.update_index_progress(&index.id, files_total, 0, 0)?;
 
-    // Parse all files to extract chunks
+    // Parse files to extract chunks
     let mut all_chunks: Vec<CodeChunk> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     let mut files_processed: u32 = 0;
 
-    for file_path in &files {
+    for file_path in &files_to_parse {
         match parser::extract_chunks_from_file(file_path) {
             Ok(chunks) => {
                 all_chunks.extend(chunks);
@@ -83,14 +120,15 @@ pub async fn index_repository(
             }
         }
 
-        // Update progress every 10 files
         if files_processed % 10 == 0 || files_processed == files_total {
             let _ = db.update_index_progress(&index.id, files_total, files_processed, 0);
         }
     }
 
     if all_chunks.is_empty() {
-        db.update_index_status(&index.id, IndexStatus::Complete, None)?;
+        // No new chunks to embed — just update commit and total
+        let total = db.count_chunks_for_index(&index.id)?;
+        db.update_index_complete(&index.id, &current_commit, total)?;
         return Ok(IndexingResult {
             chunks_indexed: 0,
             files_processed: files_processed as usize,
@@ -103,13 +141,11 @@ pub async fn index_repository(
         .ok_or_else(|| AppError::Embedding(format!("Unknown provider: {}", embedding_provider)))?;
 
     // Generate embeddings in batches
-    let mut chunks_indexed: u32 = 0;
+    let mut new_chunks_indexed: u32 = 0;
 
     for batch in all_chunks.chunks(EMBEDDING_BATCH_SIZE) {
-        // Prepare texts for embedding
         let texts: Vec<String> = batch.iter().map(|c| c.to_embedding_text()).collect();
 
-        // Generate embeddings
         let embeddings = match provider.embed_texts(api_key, embedding_model, &texts).await {
             Ok(emb) => emb,
             Err(e) => {
@@ -118,7 +154,6 @@ pub async fn index_repository(
             }
         };
 
-        // Store chunks with embeddings
         for (chunk, embedding) in batch.iter().zip(embeddings.iter()) {
             db.insert_chunk(
                 &index.id,
@@ -135,25 +170,73 @@ pub async fn index_repository(
                 chunk.visibility.as_deref(),
                 embedding,
             )?;
-            chunks_indexed += 1;
+            new_chunks_indexed += 1;
         }
 
-        // Update progress after each batch
-        let _ = db.update_index_progress(&index.id, files_total, files_processed, chunks_indexed);
+        let _ = db.update_index_progress(&index.id, files_total, files_processed, new_chunks_indexed);
     }
 
-    // Get current HEAD commit
-    let commit_sha = crate::codebase::get_head_commit(local_path)
-        .unwrap_or_else(|_| "unknown".to_string());
+    // Final chunk count (existing retained + newly added)
+    let total_chunks = db.count_chunks_for_index(&index.id)?;
+    db.update_index_complete(&index.id, &current_commit, total_chunks)?;
 
-    // Update status to complete
-    db.update_index_complete(&index.id, &commit_sha, chunks_indexed)?;
+    if is_incremental {
+        println!(
+            "[Index] Incremental complete: {} new chunks embedded, {} total chunks",
+            new_chunks_indexed, total_chunks
+        );
+    }
 
     Ok(IndexingResult {
-        chunks_indexed: chunks_indexed as usize,
+        chunks_indexed: new_chunks_indexed as usize,
         files_processed: files_processed as usize,
         errors,
     })
+}
+
+/// Check if incremental indexing is possible.
+/// Returns Some((from_commit, changed_files, deleted_files)) if yes, None for full re-index.
+fn can_do_incremental(
+    index: &CodebaseIndex,
+    local_path: &str,
+    current_commit: &str,
+    embedding_provider: &str,
+    embedding_model: &str,
+) -> Option<(String, Vec<String>, Vec<String>)> {
+    // Need a previous commit
+    let last_commit = index.last_indexed_commit.as_ref()?;
+
+    // Must be using same provider/model (embeddings aren't interchangeable)
+    if index.embedding_provider != embedding_provider || index.embedding_model != embedding_model {
+        println!("[Index] Provider/model changed ({}/{} -> {}/{}), doing full re-index",
+            index.embedding_provider, index.embedding_model, embedding_provider, embedding_model);
+        return None;
+    }
+
+    // Must have been completed before
+    if index.index_status != IndexStatus::Complete && index.index_status != IndexStatus::Failed {
+        return None;
+    }
+
+    // Same commit — nothing to do (will still proceed but with 0 files)
+    if last_commit == current_commit {
+        return Some((last_commit.clone(), Vec::new(), Vec::new()));
+    }
+
+    // Verify the old commit still exists in the repo
+    if !crate::codebase::commit_exists(local_path, last_commit) {
+        println!("[Index] Previous commit {} no longer exists, doing full re-index", &last_commit[..7.min(last_commit.len())]);
+        return None;
+    }
+
+    // Get the diff
+    match crate::codebase::get_changed_files(local_path, last_commit, current_commit) {
+        Ok((changed, deleted)) => Some((last_commit.clone(), changed, deleted)),
+        Err(e) => {
+            println!("[Index] Failed to get git diff, doing full re-index: {}", e);
+            None
+        }
+    }
 }
 
 /// Collect all parseable source files in a directory

@@ -2,10 +2,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{AppError, AppResult};
 
-// GitHub OAuth configuration
-// In production, these should be loaded from a config file or environment
-const GITHUB_CLIENT_ID: &str = "Iv23liC6bORxIX5AC6u1";
-const GITHUB_CLIENT_SECRET: &str = "e05ae92c595715c3c3660f19699abcea53158219";
+// GitHub OAuth configuration - loaded from .env at compile time
+const GITHUB_CLIENT_ID: &str = env!("GITHUB_CLIENT_ID");
+const GITHUB_CLIENT_SECRET: &str = env!("GITHUB_CLIENT_SECRET");
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GitHubUser {

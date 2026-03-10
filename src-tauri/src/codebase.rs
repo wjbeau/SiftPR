@@ -30,6 +30,9 @@ pub fn analyze_repository(repo_path: &str) -> AppResult<CodebaseProfile> {
     // Find and read config files
     let config_files = find_config_files(path)?;
 
+    // Find and read documentation files (README, CLAUDE.md, ARCHITECTURE.md, etc.)
+    let documentation_files = find_documentation_files(path)?;
+
     // Detect patterns from the codebase
     let patterns = detect_patterns(path, &config_files)?;
 
@@ -41,6 +44,7 @@ pub fn analyze_repository(repo_path: &str) -> AppResult<CodebaseProfile> {
         file_count,
         language_breakdown,
         config_files,
+        documentation_files,
         patterns,
         style_summary,
     })
@@ -59,6 +63,56 @@ pub fn get_head_commit(repo_path: &str) -> AppResult<String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Check if a commit exists in the repository
+pub fn commit_exists(repo_path: &str, commit_sha: &str) -> bool {
+    Command::new("git")
+        .args(["cat-file", "-t", commit_sha])
+        .current_dir(repo_path)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Get files changed between two commits (added, modified, deleted)
+/// Returns (changed_files, deleted_files) as relative paths
+pub fn get_changed_files(repo_path: &str, from_commit: &str, to_commit: &str) -> AppResult<(Vec<String>, Vec<String>)> {
+    // Get added + modified files
+    let output = Command::new("git")
+        .args(["diff", "--name-only", "--diff-filter=AM", &format!("{}..{}", from_commit, to_commit)])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| AppError::Internal(format!("Failed to run git diff: {}", e)))?;
+
+    let changed: Vec<String> = if output.status.success() {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .collect()
+    } else {
+        return Err(AppError::Internal("Failed to get changed files from git".to_string()));
+    };
+
+    // Get deleted files
+    let output = Command::new("git")
+        .args(["diff", "--name-only", "--diff-filter=D", &format!("{}..{}", from_commit, to_commit)])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| AppError::Internal(format!("Failed to run git diff: {}", e)))?;
+
+    let deleted: Vec<String> = if output.status.success() {
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(|l| l.to_string())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    Ok((changed, deleted))
 }
 
 fn gather_directory_structure(root: &Path) -> AppResult<Vec<String>> {
@@ -235,6 +289,115 @@ fn find_config_files(root: &Path) -> AppResult<Vec<ConfigFile>> {
     }
 
     Ok(configs)
+}
+
+/// Find documentation and architecture files, reading their full content.
+/// These provide the AI with high-level understanding of the project.
+fn find_documentation_files(root: &Path) -> AppResult<Vec<ConfigFile>> {
+    const MAX_DOC_SIZE: u64 = 100_000; // 100KB max per doc
+
+    // Root-level documentation files
+    let root_doc_patterns = [
+        "README.md",
+        "README.rst",
+        "README.txt",
+        "CLAUDE.md",
+        "AGENTS.md",
+        "ARCHITECTURE.md",
+        "DESIGN.md",
+        "CONTRIBUTING.md",
+        "DEVELOPMENT.md",
+        "HACKING.md",
+        "CONVENTIONS.md",
+        "STYLE_GUIDE.md",
+        "API.md",
+        "CHANGELOG.md",
+    ];
+
+    let mut docs = Vec::new();
+
+    // Check root-level docs
+    for pattern in &root_doc_patterns {
+        let doc_path = root.join(pattern);
+        if doc_path.exists() && doc_path.is_file() {
+            if let Ok(metadata) = doc_path.metadata() {
+                if metadata.len() <= MAX_DOC_SIZE {
+                    if let Ok(content) = fs::read_to_string(&doc_path) {
+                        docs.push(ConfigFile {
+                            path: pattern.to_string(),
+                            content,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    // Also check case-insensitively for common doc patterns
+    if let Ok(entries) = fs::read_dir(root) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let lower = name.to_lowercase();
+
+            // Skip if we already found this file via exact match
+            if docs.iter().any(|d| d.path == name) {
+                continue;
+            }
+
+            // Catch variations like readme.md, Architecture.md, etc.
+            let is_doc = (lower.starts_with("readme") || lower.starts_with("claude") ||
+                lower.starts_with("architecture") || lower.starts_with("design") ||
+                lower.starts_with("contributing") || lower.starts_with("development"))
+                && (lower.ends_with(".md") || lower.ends_with(".rst") || lower.ends_with(".txt"));
+
+            if is_doc {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Ok(metadata) = path.metadata() {
+                        if metadata.len() <= MAX_DOC_SIZE {
+                            if let Ok(content) = fs::read_to_string(&path) {
+                                docs.push(ConfigFile {
+                                    path: name,
+                                    content,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Check for docs/ or doc/ directory
+    for docs_dir_name in ["docs", "doc", "documentation"] {
+        let docs_dir = root.join(docs_dir_name);
+        if docs_dir.exists() && docs_dir.is_dir() {
+            if let Ok(entries) = fs::read_dir(&docs_dir) {
+                for entry in entries.filter_map(|e| e.ok()).take(20) {
+                    let path = entry.path();
+                    if path.is_file() {
+                        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                        if ["md", "rst", "txt"].contains(&ext) {
+                            if let Ok(metadata) = path.metadata() {
+                                if metadata.len() <= MAX_DOC_SIZE {
+                                    if let Ok(content) = fs::read_to_string(&path) {
+                                        if let Ok(rel_path) = path.strip_prefix(root) {
+                                            docs.push(ConfigFile {
+                                                path: rel_path.to_string_lossy().to_string(),
+                                                content,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(docs)
 }
 
 fn detect_patterns(root: &Path, config_files: &[ConfigFile]) -> AppResult<CodebasePatterns> {
@@ -605,6 +768,22 @@ pub fn generate_context_summary(profile: &CodebaseProfile) -> String {
         summary.push_str("\n**Config files present:**\n");
         for config in profile.config_files.iter().take(5) {
             summary.push_str(&format!("- {}\n", config.path));
+        }
+    }
+
+    // Documentation content — this is the most valuable context for AI agents
+    if !profile.documentation_files.is_empty() {
+        summary.push_str("\n---\n\n## Project Documentation\n\n");
+        for doc in &profile.documentation_files {
+            summary.push_str(&format!("### {}\n\n", doc.path));
+            // Truncate very long docs to keep context manageable
+            let content = if doc.content.len() > 8000 {
+                format!("{}...\n\n(truncated, {} total chars)", &doc.content[..8000], doc.content.len())
+            } else {
+                doc.content.clone()
+            };
+            summary.push_str(&content);
+            summary.push_str("\n\n");
         }
     }
 

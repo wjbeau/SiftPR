@@ -8,6 +8,7 @@ pub fn get_system_prompt(agent_type: AgentType) -> &'static str {
         AgentType::Style => STYLE_AGENT_PROMPT,
         AgentType::Performance => PERFORMANCE_AGENT_PROMPT,
         AgentType::Research => RESEARCH_AGENT_PROMPT,
+        AgentType::Profiler => PROFILER_AGENT_PROMPT,
     }
 }
 
@@ -132,6 +133,47 @@ Another agent has a question it cannot answer from the PR diff alone. Your job i
   "additional_context": "Anything the calling agent should also be aware of"
 }"#;
 
+const PROFILER_AGENT_PROMPT: &str = r#"You are a codebase profiling agent. Your job is to analyze a repository's structure, documentation, and patterns to produce a concise reference guide that will help code reviewers understand this codebase.
+
+You will receive the output of a filesystem analysis (languages, patterns, directory structure, config files) along with the full content of any documentation files found (README, CLAUDE.md, ARCHITECTURE.md, etc.).
+
+Your job is to synthesize all of this into a useful, structured summary that answers: "What does a reviewer need to know about this codebase to review PRs effectively?"
+
+## What to Include
+
+1. **Project Overview** — What the project does, its purpose, and key technologies. One paragraph max.
+
+2. **Architecture** — How the codebase is organized. What are the main modules/layers? How do they interact? Where does business logic live vs. infrastructure?
+
+3. **Key Conventions** — Naming patterns, error handling approach, testing patterns, import conventions. Things a reviewer should flag if violated.
+
+4. **Important Boundaries** — API contracts, database schema patterns, security-sensitive areas, shared types/interfaces. Areas where changes have high blast radius.
+
+5. **Development Workflow** — Build commands, test commands, deployment notes. Anything from docs that a reviewer should know.
+
+6. **Review Guidance** — Based on the architecture and patterns, what should reviewers pay special attention to? What are common pitfalls?
+
+## Rules
+- Be concise. This will be injected into AI prompts, so every token matters.
+- Prioritize information that helps with code review, not general documentation.
+- Use bullet points and short paragraphs. No fluff.
+- If documentation is sparse, say so and work with what you have.
+- Do NOT invent information — only report what you can see in the provided data."#;
+
+/// Build the user prompt for the profiler agent
+pub fn build_profiler_prompt(context_summary: &str) -> String {
+    format!(
+        r#"Analyze this codebase and produce a reviewer's reference guide.
+
+{context}
+
+Based on the above filesystem analysis and documentation, produce a structured Markdown summary that will help AI agents and human reviewers understand this codebase when reviewing pull requests.
+
+Keep it concise but comprehensive. Focus on what matters for code review."#,
+        context = context_summary,
+    )
+}
+
 /// Build the user prompt for an agent with PR context
 pub fn build_agent_prompt(
     agent_type: AgentType,
@@ -146,6 +188,7 @@ pub fn build_agent_prompt(
         AgentType::Style => "Focus ONLY on code style, naming, and consistency.",
         AgentType::Performance => "Focus ONLY on performance issues and optimizations.",
         AgentType::Research => "Focus on researching the codebase to find related code, usage patterns, and dependencies of the changed files. Report findings about how changes impact the broader codebase.",
+        AgentType::Profiler => "Focus on producing a codebase overview for reviewers.",
     };
 
     let codebase_section = codebase_context

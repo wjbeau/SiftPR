@@ -383,9 +383,14 @@ async fn ai_analyze_pr_orchestrated(
         let linked = app.db.get_linked_repo(&user.id, &repo_full_name)?;
         let context = if with_codebase_context.unwrap_or(false) {
             linked.as_ref().and_then(|l| {
-                l.profile_data.as_ref().map(|profile| {
-                    codebase::generate_context_summary(profile)
-                })
+                // Prefer AI summary if available, fall back to raw profile summary
+                if let Some(ref ai_summary) = l.ai_summary {
+                    Some(format!("## Codebase Context (AI-generated)\n\n{}", ai_summary))
+                } else {
+                    l.profile_data.as_ref().map(|profile| {
+                        codebase::generate_context_summary(profile)
+                    })
+                }
             })
         } else {
             None
@@ -600,10 +605,11 @@ fn codebase_unlink_repo(
 }
 
 #[tauri::command]
-fn codebase_analyze(
+async fn codebase_analyze(
     repo_full_name: String,
     state: State<'_, Mutex<AppState>>,
 ) -> AppResult<CodebaseProfile> {
+    // Step 1: Filesystem analysis (instant, no API calls)
     let (user_id, local_path) = {
         let app = state.lock().unwrap();
         let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
@@ -612,16 +618,60 @@ fn codebase_analyze(
         (user.id, linked.local_path)
     };
 
-    // Analyze the repository
     let profile = codebase::analyze_repository(&local_path)?;
-
-    // Get current commit
     let commit_sha = codebase::get_head_commit(&local_path)?;
 
     // Save the profile
     {
         let app = state.lock().unwrap();
         app.db.update_repo_profile(&user_id, &repo_full_name, &commit_sha, &profile)?;
+    }
+
+    // Step 2: AI profiling — if an AI provider is configured and the profiler agent is enabled
+    let ai_config = {
+        let app = state.lock().unwrap();
+        let active = app.db.get_active_ai_setting(&user_id)?;
+        let agent_settings = app.db.get_agent_settings(&user_id)?;
+        let profiler_setting = agent_settings.iter().find(|s| s.agent_type == "profiler");
+
+        // Skip if profiler is explicitly disabled
+        let enabled = profiler_setting.map(|s| s.enabled).unwrap_or(true);
+        if !enabled {
+            None
+        } else if let Some((settings, key)) = active {
+            let model = profiler_setting
+                .and_then(|s| s.model_override.clone())
+                .unwrap_or(settings.model_preference.clone());
+            let custom_prompt = profiler_setting.and_then(|s| s.custom_prompt.clone());
+            Some((settings.provider, key, model, custom_prompt))
+        } else {
+            None
+        }
+    };
+
+    if let Some((provider, api_key, model, custom_prompt)) = ai_config {
+        println!("[Analyze] Running AI profiler for {} with {}/{}", repo_full_name, provider, model);
+
+        let context_summary = codebase::generate_context_summary(&profile);
+        let system_prompt = custom_prompt
+            .as_deref()
+            .unwrap_or_else(|| prompts::get_system_prompt(AgentType::Profiler));
+        let user_prompt = prompts::build_profiler_prompt(&context_summary);
+
+        let client = ai::AIClient::new();
+        match client.call_with_system(&provider, &api_key, &model, system_prompt, &user_prompt).await {
+            Ok(summary) => {
+                println!("[Analyze] AI profiler complete ({} chars)", summary.len());
+                let app = state.lock().unwrap();
+                let _ = app.db.update_repo_ai_summary(&user_id, &repo_full_name, &summary);
+            }
+            Err(e) => {
+                // Don't fail the whole analyze — the filesystem profile is still valuable
+                println!("[Analyze] AI profiler failed (non-fatal): {}", e);
+            }
+        }
+    } else {
+        println!("[Analyze] No AI provider configured, skipping profiler agent");
     }
 
     Ok(profile)
@@ -735,63 +785,63 @@ pub struct IndexStatus {
 #[tauri::command]
 async fn codebase_index_start(
     repo_full_name: String,
+    with_embeddings: Option<bool>,
     state: State<'_, Mutex<AppState>>,
 ) -> AppResult<()> {
     // Get user and linked repo info
-    let (user_id, local_path, embedding_provider, api_key) = {
+    let (user_id, local_path) = {
         let app = state.lock().unwrap();
         let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
 
         let linked = app.db.get_linked_repo(&user.id, &repo_full_name)?
             .ok_or_else(|| AppError::Internal(format!("Repository not linked: {}", repo_full_name)))?;
 
-        // Find the best configured provider that supports embeddings (openai > google)
-        // This is decoupled from the active review AI provider
-        let (provider, key) = app.db.get_embedding_provider(&user.id)?
-            .ok_or_else(|| AppError::AIProvider(
-                "No embedding-capable AI provider configured. Add an OpenAI or Google API key in Settings to enable indexing.".to_string()
-            ))?;
-
-        (user.id, linked.local_path, provider, key)
+        (user.id, linked.local_path)
     };
 
-    // Determine embedding model based on provider
-    let embed_model = match embedding_provider.as_str() {
-        "openai" => "text-embedding-3-small",
-        "google" => "gemini-embedding-001",
-        _ => "text-embedding-3-small",
-    };
-
-    // Run indexing (this is async)
-    let db = {
+    // Get embedding provider config
+    let embedding_config = {
         let app = state.lock().unwrap();
-        // Create a new database connection for the async operation
-        db::Database::new()?
+        app.db.get_embedding_provider(&user_id)?
     };
 
-    let result = indexer::index_repository(
-        &db,
-        &user_id,
-        &repo_full_name,
-        &local_path,
-        &embedding_provider,
-        embed_model,
-        &api_key,
-    ).await;
+    if let Some((embedding_provider, api_key)) = embedding_config {
+        let embed_model = match embedding_provider.as_str() {
+            "openai" => "text-embedding-3-small",
+            "google" => "gemini-embedding-001",
+            _ => "text-embedding-3-small",
+        };
 
-    if let Err(ref e) = result {
-        // Update DB status to "failed" so the UI can display the error
-        // instead of leaving it stuck at "pending" or "indexing"
-        if let Ok(Some(index)) = db.get_codebase_index(&user_id, &repo_full_name) {
-            let _ = db.update_index_status(
-                &index.id,
-                crate::db::IndexStatus::Failed,
-                Some(&e.to_string()),
-            );
+        let db = {
+            let _app = state.lock().unwrap();
+            db::Database::new()?
+        };
+
+        let result = indexer::index_repository(
+            &db,
+            &user_id,
+            &repo_full_name,
+            &local_path,
+            &embedding_provider,
+            embed_model,
+            &api_key,
+        ).await;
+
+        if let Err(ref e) = result {
+            if let Ok(Some(index)) = db.get_codebase_index(&user_id, &repo_full_name) {
+                let _ = db.update_index_status(
+                    &index.id,
+                    crate::db::IndexStatus::Failed,
+                    Some(&e.to_string()),
+                );
+            }
         }
+
+        result?;
+    } else {
+        println!("[Index] No embedding provider configured, skipping semantic indexing");
     }
 
-    result?;
     Ok(())
 }
 
@@ -946,6 +996,12 @@ fn agents_get_defaults() -> Vec<AgentInfo> {
             name: "Research Agent".to_string(),
             description: "Researches the codebase to provide context about how changes impact related code".to_string(),
             default_prompt: prompts::get_system_prompt(AgentType::Research).to_string(),
+        },
+        AgentInfo {
+            agent_type: "profiler".to_string(),
+            name: "Profiler Agent".to_string(),
+            description: "Analyzes your codebase structure and documentation to produce a reviewer's reference guide used as context in PR reviews".to_string(),
+            default_prompt: prompts::get_system_prompt(AgentType::Profiler).to_string(),
         },
     ]
 }

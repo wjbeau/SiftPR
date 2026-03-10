@@ -9,6 +9,7 @@ pub enum AgentType {
     Style,
     Performance,
     Research,
+    Profiler,
 }
 
 impl AgentType {
@@ -19,6 +20,7 @@ impl AgentType {
             AgentType::Style => "style",
             AgentType::Performance => "performance",
             AgentType::Research => "research",
+            AgentType::Profiler => "profiler",
         }
     }
 }
