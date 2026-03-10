@@ -18,6 +18,7 @@ interface PendingComment {
   line: number;
   lineEnd: number;
   body: string;
+  newLineNum?: number; // Actual file line number for GitHub API
 }
 
 type ReviewAction = "approve" | "request_changes" | "comment";
@@ -33,7 +34,7 @@ export function Review() {
   const [selectedFile, setSelectedFile] = useState<GitHubFile | null>(null);
   const [viewedFiles, setViewedFiles] = useState<Set<string>>(new Set());
   const [pendingComments, setPendingComments] = useState<PendingComment[]>([]);
-  const [, setShowReviewDialog] = useState(false);
+  const [showReviewDialog, setShowReviewDialog] = useState(false);
   const [reviewBody, setReviewBody] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("all");
   const [analysis, setAnalysis] = useState<OrchestratedAnalysis | null>(null);
@@ -60,9 +61,9 @@ export function Review() {
     });
   }, []);
 
-  const addComment = useCallback((file: string, lineStart: number, lineEnd: number, body: string) => {
+  const addComment = useCallback((file: string, lineStart: number, lineEnd: number, body: string, newLineNum?: number) => {
     setPendingComments((prev) => {
-      const newComment: PendingComment = { file, line: lineStart, lineEnd, body };
+      const newComment: PendingComment = { file, line: lineStart, lineEnd, body, newLineNum };
       // Fire-and-forget save to backend
       if (owner && repo && prNumberInt) {
         draftComments.save(owner, repo, prNumberInt, file, lineStart, lineEnd, body)
@@ -366,11 +367,11 @@ export function Review() {
         ? "REQUEST_CHANGES"
         : "COMMENT";
 
-      // Convert pending comments to GitHub format
+      // Convert pending comments to GitHub format using actual line numbers
       const comments: ReviewComment[] = pendingComments.map((c) => ({
         path: c.file,
-        line: c.line,
-        side: "RIGHT" as const,
+        line: c.newLineNum ?? null,
+        side: c.newLineNum ? ("RIGHT" as const) : null,
         body: c.body,
       }));
 
@@ -696,6 +697,93 @@ export function Review() {
           </div>
         </TabsContent>
       </Tabs>
+
+      {/* Review submission dialog */}
+      {showReviewDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => setShowReviewDialog(false)}>
+          <div className="bg-background border rounded-lg shadow-xl w-[520px] max-h-[80vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-3 border-b">
+              <h3 className="font-semibold">Submit Review</h3>
+              <button onClick={() => setShowReviewDialog(false)} className="p-1 rounded hover:bg-muted">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="px-4 py-3 flex-1 overflow-auto">
+              {pendingComments.length > 0 && (
+                <div className="mb-3">
+                  <p className="text-sm text-muted-foreground mb-2">
+                    {pendingComments.length} inline comment{pendingComments.length !== 1 ? "s" : ""} will be included
+                  </p>
+                  <div className="max-h-32 overflow-auto border rounded p-2 space-y-1.5">
+                    {pendingComments.map((c, i) => (
+                      <div key={i} className="text-xs">
+                        <span className="font-mono text-muted-foreground">{c.file.split("/").pop()}</span>
+                        {c.newLineNum && <span className="text-muted-foreground">:{c.newLineNum}</span>}
+                        <span className="text-muted-foreground"> — </span>
+                        <span className="truncate">{c.body.length > 80 ? c.body.slice(0, 80) + "…" : c.body}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <label className="text-sm font-medium">Review summary</label>
+              <textarea
+                value={reviewBody}
+                onChange={(e) => setReviewBody(e.target.value)}
+                placeholder="Leave a comment on this pull request…"
+                className="w-full mt-1.5 p-2 text-sm bg-background border rounded resize-none focus:ring-2 focus:ring-ring focus:outline-none"
+                rows={5}
+                autoFocus
+              />
+
+              {submitError && (
+                <p className="text-xs text-destructive mt-2">{submitError}</p>
+              )}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 px-4 py-3 border-t">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  submitReview("comment");
+                }}
+                disabled={isSubmittingReview || (!reviewBody.trim() && pendingComments.length === 0)}
+                className="gap-1.5"
+              >
+                {isSubmittingReview ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageSquare className="h-4 w-4" />}
+                Comment
+              </Button>
+              {user?.github_username !== pr?.user.login && (
+                <>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => submitReview("approve")}
+                    disabled={isSubmittingReview}
+                    className="gap-1.5 text-green-600 hover:text-green-700 hover:bg-green-50 dark:hover:bg-green-950/30"
+                  >
+                    {isSubmittingReview ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                    Approve
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => submitReview("request_changes")}
+                    disabled={isSubmittingReview || !reviewBody.trim()}
+                    className="gap-1.5 text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30"
+                  >
+                    {isSubmittingReview ? <Loader2 className="h-4 w-4 animate-spin" /> : <XCircle className="h-4 w-4" />}
+                    Request Changes
+                  </Button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2217,7 +2305,7 @@ interface DiffPanelProps {
   repo: string;
   baseSha: string;
   headSha: string;
-  onAddComment?: (file: string, lineStart: number, lineEnd: number, body: string) => void;
+  onAddComment?: (file: string, lineStart: number, lineEnd: number, body: string, newLineNum?: number) => void;
   onEditComment?: (index: number, newBody: string) => void;
   onDeleteComment?: (index: number) => void;
   pendingComments?: PendingComment[];
@@ -2567,7 +2655,10 @@ function DiffPanel({ file, owner, repo, baseSha, headSha: _headSha, onAddComment
 
   const handleSubmitComment = () => {
     if (commentingLines && commentText.trim() && onAddComment) {
-      onAddComment(file.filename, commentingLines.startIndex, commentingLines.endIndex, commentText.trim());
+      // Look up actual new line number for the GitHub API
+      const endRow = diffRows[commentingLines.endIndex];
+      const newLineNum = endRow?.right?.newLineNum;
+      onAddComment(file.filename, commentingLines.startIndex, commentingLines.endIndex, commentText.trim(), newLineNum);
       setCommentText("");
       setCommentingLines(null);
     }

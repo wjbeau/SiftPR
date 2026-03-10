@@ -198,7 +198,7 @@ export const auth = {
   getOAuthUrl: () => invoke<string>("auth_get_oauth_url"),
   exchangeCode: (code: string) => invoke<User>("auth_exchange_code", { code }),
   getUser: () => invoke<User | null>("auth_get_user"),
-  logout: () => invoke<void>("auth_logout"),
+  logout: (keepData: boolean) => invoke<void>("auth_logout", { keepData }),
 };
 
 // Settings API

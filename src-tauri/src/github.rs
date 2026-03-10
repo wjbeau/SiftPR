@@ -163,6 +163,7 @@ impl GitHubClient {
         }
 
         let token_data: TokenResponse = response.json().await?;
+
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -584,7 +585,9 @@ impl GitHubClient {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewComment {
     pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub line: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub side: Option<String>, // LEFT or RIGHT
     pub body: String,
 }

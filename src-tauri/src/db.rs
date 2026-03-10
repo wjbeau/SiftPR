@@ -43,7 +43,7 @@ impl Database {
                 id TEXT PRIMARY KEY,
                 github_username TEXT NOT NULL,
                 github_avatar_url TEXT,
-                github_access_token TEXT NOT NULL,
+                github_access_token TEXT,
                 github_refresh_token TEXT,
                 token_expires_at INTEGER,
                 refresh_token_expires_at INTEGER,
@@ -73,6 +73,43 @@ impl Database {
             "ALTER TABLE linked_repos ADD COLUMN ai_summary TEXT",
             [],
         );
+
+        // Migration: make github_access_token nullable (for soft logout)
+        // SQLite doesn't support ALTER COLUMN, so recreate the table
+        {
+            let has_not_null: bool = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='users'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .map(|sql| sql.contains("github_access_token TEXT NOT NULL"))
+                .unwrap_or(false);
+
+            if has_not_null {
+                conn.execute_batch(
+                    r#"
+                    PRAGMA foreign_keys = OFF;
+                    DROP TABLE IF EXISTS users_new;
+                    CREATE TABLE users_new (
+                        id TEXT PRIMARY KEY,
+                        github_username TEXT NOT NULL,
+                        github_avatar_url TEXT,
+                        github_access_token TEXT,
+                        github_refresh_token TEXT,
+                        token_expires_at INTEGER,
+                        refresh_token_expires_at INTEGER,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    );
+                    INSERT INTO users_new SELECT * FROM users;
+                    DROP TABLE users;
+                    ALTER TABLE users_new RENAME TO users;
+                    PRAGMA foreign_keys = ON;
+                    "#,
+                )?;
+            }
+        }
 
         conn.execute_batch(
             r#"
@@ -287,7 +324,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, github_username, github_avatar_url, created_at, updated_at
-             FROM users LIMIT 1"
+             FROM users WHERE github_access_token IS NOT NULL LIMIT 1"
         )?;
 
         let user = stmt.query_row([], |row| {
@@ -396,6 +433,24 @@ impl Database {
             params![user_id, encrypted_access, encrypted_refresh, token_expires_at, refresh_token_expires_at, now],
         )?;
 
+        Ok(())
+    }
+
+    /// Get user ID regardless of token state (for logout operations)
+    pub fn get_any_user_id(&self) -> AppResult<Option<String>> {
+        let conn = self.conn.lock().unwrap();
+        let id = conn.query_row("SELECT id FROM users LIMIT 1", [], |row| row.get(0)).ok();
+        Ok(id)
+    }
+
+    /// Clear the user's token without deleting any data. On next login the same
+    /// user row is matched by github_id so all settings are preserved.
+    pub fn clear_user_token(&self, user_id: &str) -> AppResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE users SET github_access_token = NULL, github_refresh_token = NULL, token_expires_at = NULL, refresh_token_expires_at = NULL WHERE id = ?1",
+            params![user_id],
+        )?;
         Ok(())
     }
 

@@ -7,7 +7,7 @@ interface AuthContextType {
   user: User | null;
   isLoading: boolean;
   isAuthenticated: boolean;
-  logout: () => Promise<void>;
+  logout: (keepData: boolean) => Promise<void>;
   refetch: () => void;
 }
 
@@ -42,8 +42,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const user = data ?? null;
 
-  const handleLogout = async () => {
-    await auth.logout();
+  const handleLogout = async (keepData: boolean) => {
+    await auth.logout(keepData);
     // Clear localStorage caches first
     localStorage.removeItem("siftpr-cached-repos");
     localStorage.removeItem("siftpr-cached-favorites");

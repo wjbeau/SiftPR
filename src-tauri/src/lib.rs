@@ -122,10 +122,14 @@ fn auth_get_user(state: State<'_, Mutex<AppState>>) -> AppResult<Option<User>> {
 }
 
 #[tauri::command]
-fn auth_logout(state: State<'_, Mutex<AppState>>) -> AppResult<()> {
+fn auth_logout(keep_data: bool, state: State<'_, Mutex<AppState>>) -> AppResult<()> {
     let app = state.lock().unwrap();
-    if let Some(user) = app.db.get_current_user()? {
-        app.db.delete_user(&user.id)?;
+    if let Some(user_id) = app.db.get_any_user_id()? {
+        if keep_data {
+            app.db.clear_user_token(&user_id)?;
+        } else {
+            app.db.delete_user(&user_id)?;
+        }
     }
     Ok(())
 }
