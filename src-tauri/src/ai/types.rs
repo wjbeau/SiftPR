@@ -8,6 +8,7 @@ pub enum AgentType {
     Architecture,
     Style,
     Performance,
+    Research,
 }
 
 impl AgentType {
@@ -17,6 +18,7 @@ impl AgentType {
             AgentType::Architecture => "architecture",
             AgentType::Style => "style",
             AgentType::Performance => "performance",
+            AgentType::Research => "research",
         }
     }
 }
@@ -153,6 +155,23 @@ pub struct KeyChange {
     pub importance: String,
 }
 
+/// A file within a functional group
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GroupedFile {
+    pub filename: String,
+    pub deprioritized: bool,
+    pub reason: Option<String>,
+}
+
+/// A functional area group of files
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileGroup {
+    pub name: String,
+    pub description: String,
+    pub importance: String, // "high" | "medium" | "low"
+    pub files: Vec<GroupedFile>,
+}
+
 /// Aggregated analysis from all agents
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrchestratedAnalysis {
@@ -167,6 +186,8 @@ pub struct OrchestratedAnalysis {
     pub failed_agents: Vec<FailedAgent>,
     pub total_processing_time_ms: u64,
     pub total_token_usage: TokenUsage,
+    #[serde(default)]
+    pub file_groups: Vec<FileGroup>,
 }
 
 /// Raw response format expected from agents (for JSON parsing)

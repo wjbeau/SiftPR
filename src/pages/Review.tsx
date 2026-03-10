@@ -3,7 +3,7 @@ import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import { ArrowLeft, FileCode, Loader2, Sparkles, Calendar, MessageSquare, User, Users, GitPullRequest, RefreshCw, ClipboardList, AlertTriangle, BookOpen, Files, ChevronDown, ChevronUp, Check, CheckCircle2, XCircle, MessageCircle, Eye, EyeOff, Plus, Send, Filter, History, Pencil, Trash2, X, Shield, Layers, Paintbrush, Zap, FolderOpen, Settings } from "lucide-react";
-import { github, GitHubFile, GitHubPR, review, ai, analysis as analysisApi, OrchestratedAnalysis, FileAnalysis, LineAnnotation, AgentType, codebase, LinkedRepo, ReviewComment } from "@/lib/api";
+import { github, GitHubFile, GitHubPR, review, ai, analysis as analysisApi, OrchestratedAnalysis, FileAnalysis, LineAnnotation, AgentType, codebase, LinkedRepo, ReviewComment, draftComments } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -13,6 +13,7 @@ import { CommentToolbar } from "@/components/CommentToolbar";
 type ViewMode = "all" | "since_review";
 
 interface PendingComment {
+  id?: string;
   file: string;
   line: number;
   lineEnd: number;
@@ -60,15 +61,53 @@ export function Review() {
   }, []);
 
   const addComment = useCallback((file: string, lineStart: number, lineEnd: number, body: string) => {
-    setPendingComments((prev) => [...prev, { file, line: lineStart, lineEnd, body }]);
-  }, []);
+    setPendingComments((prev) => {
+      const newComment: PendingComment = { file, line: lineStart, lineEnd, body };
+      // Fire-and-forget save to backend
+      if (owner && repo && prNumberInt) {
+        draftComments.save(owner, repo, prNumberInt, file, lineStart, lineEnd, body)
+          .then((saved) => {
+            setPendingComments((current) => {
+              // Find the comment we just added (by reference match on body/file/line) and add the ID
+              const idx = current.findIndex(
+                (c) => !c.id && c.file === file && c.line === lineStart && c.lineEnd === lineEnd && c.body === body
+              );
+              if (idx >= 0) {
+                const updated = [...current];
+                updated[idx] = { ...updated[idx], id: saved.id };
+                return updated;
+              }
+              return current;
+            });
+          })
+          .catch((err) => console.error("Failed to save draft comment:", err));
+      }
+      return [...prev, newComment];
+    });
+  }, [owner, repo, prNumberInt]);
 
   const editComment = useCallback((index: number, newBody: string) => {
-    setPendingComments((prev) => prev.map((c, i) => i === index ? { ...c, body: newBody } : c));
+    setPendingComments((prev) => {
+      const comment = prev[index];
+      if (comment?.id) {
+        draftComments.update(comment.id, newBody).catch((err) =>
+          console.error("Failed to update draft comment:", err)
+        );
+      }
+      return prev.map((c, i) => i === index ? { ...c, body: newBody } : c);
+    });
   }, []);
 
   const deleteComment = useCallback((index: number) => {
-    setPendingComments((prev) => prev.filter((_, i) => i !== index));
+    setPendingComments((prev) => {
+      const comment = prev[index];
+      if (comment?.id) {
+        draftComments.delete(comment.id).catch((err) =>
+          console.error("Failed to delete draft comment:", err)
+        );
+      }
+      return prev.filter((_, i) => i !== index);
+    });
   }, []);
 
   const { data: pr, isLoading: prLoading } = useQuery({
@@ -119,6 +158,27 @@ export function Review() {
       setHasInitializedViewedFiles(true);
     }
   }, [reviewState?.viewed_files, hasInitializedViewedFiles]);
+
+  // Load draft comments on mount
+  const [hasLoadedDrafts, setHasLoadedDrafts] = useState(false);
+  useEffect(() => {
+    if (owner && repo && prNumberInt && !hasLoadedDrafts) {
+      setHasLoadedDrafts(true);
+      draftComments.get(owner, repo, prNumberInt)
+        .then((drafts) => {
+          if (drafts.length > 0) {
+            setPendingComments(drafts.map((d) => ({
+              id: d.id,
+              file: d.file_path,
+              line: d.line_start,
+              lineEnd: d.line_end,
+              body: d.body,
+            })));
+          }
+        })
+        .catch((err) => console.error("Failed to load draft comments:", err));
+    }
+  }, [owner, repo, prNumberInt, hasLoadedDrafts]);
 
   // Load saved analysis when PR data is available
   const [hasLoadedAnalysis, setHasLoadedAnalysis] = useState(false);
@@ -190,11 +250,38 @@ export function Review() {
     return result;
   }, [analysis, selectedFile]);
 
-  // Compute sorted file list matching sidebar order (key changes -> context -> other)
+  // Compute sorted file list matching sidebar order
   const sortedFiles = useMemo(() => {
     if (!displayFiles.length) return [];
 
-    // If we have AI analysis, use its priorities
+    // If we have file groups from AI, use group ordering (high -> medium -> low)
+    if (analysis?.file_groups && analysis.file_groups.length > 0) {
+      const importanceOrder: Record<string, number> = { high: 0, medium: 1, low: 2 };
+      const sortedGroups = [...analysis.file_groups].sort(
+        (a, b) => (importanceOrder[a.importance] ?? 2) - (importanceOrder[b.importance] ?? 2)
+      );
+      const fileMap = new Map(displayFiles.map((f) => [f.filename, f]));
+      const ordered: GitHubFile[] = [];
+      const seen = new Set<string>();
+
+      for (const group of sortedGroups) {
+        for (const gf of group.files) {
+          if (!seen.has(gf.filename) && fileMap.has(gf.filename)) {
+            ordered.push(fileMap.get(gf.filename)!);
+            seen.add(gf.filename);
+          }
+        }
+      }
+      // Add any files not in groups
+      for (const file of displayFiles) {
+        if (!seen.has(file.filename)) {
+          ordered.push(file);
+        }
+      }
+      return ordered;
+    }
+
+    // Fallback: use file priorities
     if (analysis?.file_priorities) {
       const highPriorityFiles = new Set(
         analysis.file_priorities
@@ -309,7 +396,10 @@ export function Review() {
         }
       }
 
-      // Clear the form
+      // Clear drafts from DB then clear form
+      draftComments.clear(owner, repo, prNumberInt).catch((err) =>
+        console.error("Failed to clear draft comments:", err)
+      );
       setPendingComments([]);
       setReviewBody("");
       setShowReviewDialog(false);
@@ -1475,12 +1565,10 @@ function PrioritizedFileList({
   isAnalyzing,
   onRunAnalysis,
 }: PrioritizedFileListProps) {
-  const [expandedSections, setExpandedSections] = useState<Set<string>>(
-    new Set(["key-changes", "context", "other"])
-  );
+  const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
 
   const toggleSection = (section: string) => {
-    setExpandedSections((prev) => {
+    setCollapsedSections((prev) => {
       const next = new Set(prev);
       if (next.has(section)) {
         next.delete(section);
@@ -1491,9 +1579,22 @@ function PrioritizedFileList({
     });
   };
 
-  // Use AI analysis for prioritization when available
+  // Check if we have file groups from AI
+  const hasFileGroups = !!(analysis?.file_groups && analysis.file_groups.length > 0);
+
+  // Sort file groups by importance
+  const sortedFileGroups = useMemo(() => {
+    if (!hasFileGroups) return [];
+    const importanceOrder: Record<string, number> = { high: 0, medium: 1, low: 2 };
+    return [...analysis!.file_groups!].sort(
+      (a, b) => (importanceOrder[a.importance] ?? 2) - (importanceOrder[b.importance] ?? 2)
+    );
+  }, [analysis, hasFileGroups]);
+
+  // Fallback: Use AI analysis priorities or file characteristics for 3-bucket approach
   const { keyChanges, contextFiles, otherFiles } = useMemo(() => {
-    // If we have AI analysis, use its priorities
+    if (hasFileGroups) return { keyChanges: [], contextFiles: [], otherFiles: [] };
+
     if (analysis?.file_priorities) {
       const highPriorityFiles = new Set(
         analysis.file_priorities
@@ -1523,7 +1624,6 @@ function PrioritizedFileList({
       return { keyChanges, contextFiles, otherFiles };
     }
 
-    // Fallback: Placeholder logic based on file characteristics
     const sorted = [...files].sort(
       (a, b) => (b.additions + b.deletions) - (a.additions + a.deletions)
     );
@@ -1544,7 +1644,7 @@ function PrioritizedFileList({
     }
 
     return { keyChanges, contextFiles, otherFiles };
-  }, [files, analysis]);
+  }, [files, analysis, hasFileGroups]);
 
   if (files.length === 0) {
     return (
@@ -1552,7 +1652,7 @@ function PrioritizedFileList({
     );
   }
 
-  const renderFileItem = (file: GitHubFile) => {
+  const renderFileItem = (file: GitHubFile, deprioritized = false) => {
     const fileName = file.filename.split("/").pop() || file.filename;
     const dirPath = file.filename.includes("/")
       ? file.filename.split("/").slice(0, -1).join("/")
@@ -1566,17 +1666,22 @@ function PrioritizedFileList({
         className={cn(
           "group flex items-center gap-1 hover:bg-accent",
           isSelected && "bg-accent",
-          isViewed && "opacity-60"
+          isViewed && "opacity-60",
+          deprioritized && !isViewed && "opacity-50"
         )}
       >
         <button
           onClick={() => onSelectFile(file)}
-          className="flex-1 text-left px-3 py-2 text-sm flex flex-col gap-0.5 min-w-0"
+          className={cn(
+            "flex-1 text-left px-3 py-2 text-sm flex flex-col gap-0.5 min-w-0",
+            deprioritized && "py-1.5"
+          )}
         >
           <span className="flex items-center justify-between gap-2">
             <span className={cn(
               "truncate flex items-center gap-1.5",
-              !isViewed && "font-medium"
+              !isViewed && !deprioritized && "font-medium",
+              deprioritized && "text-xs"
             )}>
               {isViewed ? (
                 <Check className="h-3.5 w-3.5 text-green-600 flex-shrink-0" />
@@ -1623,7 +1728,7 @@ function PrioritizedFileList({
     emptyMessage?: string,
     description?: string
   ) => {
-    const isExpanded = expandedSections.has(id);
+    const isExpanded = !collapsedSections.has(id);
 
     return (
       <div key={id} className="border-b last:border-b-0">
@@ -1652,7 +1757,7 @@ function PrioritizedFileList({
               </p>
             )}
             {files.length > 0 ? (
-              files.map(renderFileItem)
+              files.map((f) => renderFileItem(f))
             ) : (
               <p className="px-3 py-2 text-xs text-muted-foreground italic">
                 {emptyMessage || "No files"}
@@ -1697,30 +1802,99 @@ function PrioritizedFileList({
         )}
       </div>
 
-      {renderSection(
-        "key-changes",
-        "Key Changes",
-        <AlertTriangle className="h-4 w-4 text-amber-500" />,
-        keyChanges,
-        "Run AI analysis to identify key changes",
-        "Most important changes to review first"
-      )}
+      {hasFileGroups ? (
+        <>
+          {sortedFileGroups.map((group) => {
+            const groupId = `group-${group.name.toLowerCase().replace(/\s+/g, "-")}`;
+            const isExpanded = !collapsedSections.has(groupId);
+            const importanceBadge = group.importance === "high"
+              ? "bg-red-100 text-red-700 dark:bg-red-950 dark:text-red-300"
+              : group.importance === "medium"
+              ? "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300"
+              : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400";
 
-      {renderSection(
-        "context",
-        "Related Context",
-        <BookOpen className="h-4 w-4 text-blue-500" />,
-        contextFiles,
-        "No related context identified",
-        "Supporting files and test coverage"
-      )}
+            const fileMap = new Map(files.map((f) => [f.filename, f]));
 
-      {renderSection(
-        "other",
-        "Other Changes",
-        <Files className="h-4 w-4 text-muted-foreground" />,
-        otherFiles,
-        "No other files"
+            return (
+              <div key={groupId} className="border-b last:border-b-0">
+                <button
+                  onClick={() => toggleSection(groupId)}
+                  className="w-full px-3 py-2.5 flex items-center gap-2 hover:bg-muted/50 transition-colors"
+                >
+                  <ChevronDown
+                    className={cn(
+                      "h-4 w-4 text-muted-foreground transition-transform",
+                      !isExpanded && "-rotate-90"
+                    )}
+                  />
+                  <span className="font-medium text-sm truncate">{group.name}</span>
+                  <span className={cn("text-[10px] px-1.5 py-0.5 rounded-full font-medium", importanceBadge)}>
+                    {group.importance}
+                  </span>
+                  <span className="text-xs text-muted-foreground ml-auto">
+                    {group.files.length}
+                  </span>
+                </button>
+
+                {isExpanded && (
+                  <div className="pb-2">
+                    <p className="px-3 pb-2 text-xs text-muted-foreground">
+                      {group.description}
+                    </p>
+                    {group.files.map((gf) => {
+                      const file = fileMap.get(gf.filename);
+                      if (!file) return null;
+                      return renderFileItem(file, gf.deprioritized);
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {/* Files not in any group */}
+          {(() => {
+            const groupedFilenames = new Set(
+              sortedFileGroups.flatMap((g) => g.files.map((f) => f.filename))
+            );
+            const ungrouped = files.filter((f) => !groupedFilenames.has(f.filename));
+            if (ungrouped.length === 0) return null;
+            return renderSection(
+              "ungrouped",
+              "Other Changes",
+              <Files className="h-4 w-4 text-muted-foreground" />,
+              ungrouped,
+              "No other files"
+            );
+          })()}
+        </>
+      ) : (
+        <>
+          {renderSection(
+            "key-changes",
+            "Key Changes",
+            <AlertTriangle className="h-4 w-4 text-amber-500" />,
+            keyChanges,
+            "Run AI analysis to identify key changes",
+            "Most important changes to review first"
+          )}
+
+          {renderSection(
+            "context",
+            "Related Context",
+            <BookOpen className="h-4 w-4 text-blue-500" />,
+            contextFiles,
+            "No related context identified",
+            "Supporting files and test coverage"
+          )}
+
+          {renderSection(
+            "other",
+            "Other Changes",
+            <Files className="h-4 w-4 text-muted-foreground" />,
+            otherFiles,
+            "No other files"
+          )}
+        </>
       )}
     </div>
   );

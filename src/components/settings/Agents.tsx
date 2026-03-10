@@ -16,11 +16,14 @@ import {
   Layers,
   Paintbrush,
   Zap,
+  Search,
   ChevronDown,
   RotateCcw,
   Loader2,
   Check,
   AlertCircle,
+  Database,
+  FileSearch,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -45,12 +48,23 @@ const AGENT_ICONS: Record<string, { icon: typeof Shield; color: string; bgColor:
     color: "text-amber-500",
     bgColor: "bg-amber-100 dark:bg-amber-950",
   },
+  research: {
+    icon: Search,
+    color: "text-violet-500",
+    bgColor: "bg-violet-100 dark:bg-violet-950",
+  },
 };
+
+interface ProviderModels {
+  provider: string;
+  models: { id: string; name: string }[];
+}
 
 interface AgentCardProps {
   agent: AgentInfo;
   settings: AgentSettings | undefined;
-  availableModels: { id: string; name: string }[];
+  providerModels: ProviderModels[];
+  embeddingCapability?: { available: boolean; provider: string | null };
   onSave: (
     agentType: string,
     modelOverride: string | null,
@@ -60,7 +74,7 @@ interface AgentCardProps {
   isSaving: boolean;
 }
 
-function AgentCard({ agent, settings, availableModels, onSave, isSaving }: AgentCardProps) {
+function AgentCard({ agent, settings, providerModels, embeddingCapability, onSave, isSaving }: AgentCardProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [enabled, setEnabled] = useState(settings?.enabled ?? true);
   const [modelOverride, setModelOverride] = useState(settings?.model_override ?? "");
@@ -70,6 +84,7 @@ function AgentCard({ agent, settings, availableModels, onSave, isSaving }: Agent
 
   const iconConfig = AGENT_ICONS[agent.agent_type] || AGENT_ICONS.security;
   const Icon = iconConfig.icon;
+  const isResearchAgent = agent.agent_type === "research";
 
   // Track changes
   useEffect(() => {
@@ -131,6 +146,19 @@ function AgentCard({ agent, settings, availableModels, onSave, isSaving }: Agent
                 {modelOverride}
               </span>
             )}
+            {isResearchAgent && embeddingCapability && (
+              embeddingCapability.available ? (
+                <span className="text-xs bg-emerald-100 dark:bg-emerald-900 px-2 py-0.5 rounded text-emerald-700 dark:text-emerald-300 flex items-center gap-1">
+                  <Database className="h-3 w-3" />
+                  Semantic Search
+                </span>
+              ) : (
+                <span className="text-xs bg-orange-100 dark:bg-orange-900 px-2 py-0.5 rounded text-orange-700 dark:text-orange-300 flex items-center gap-1">
+                  <FileSearch className="h-3 w-3" />
+                  File Search Only
+                </span>
+              )
+            )}
           </div>
           <div className="text-sm text-muted-foreground">{agent.description}</div>
         </div>
@@ -144,12 +172,52 @@ function AgentCard({ agent, settings, availableModels, onSave, isSaving }: Agent
 
       {isOpen && (
         <div className="px-4 pb-4 pt-2 border-t space-y-4">
+          {/* Research agent embedding info */}
+          {isResearchAgent && (
+            <div className={cn(
+              "p-3 rounded-lg text-sm",
+              embeddingCapability?.available
+                ? "bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900"
+                : "bg-orange-50 dark:bg-orange-950/30 border border-orange-200 dark:border-orange-900"
+            )}>
+              {embeddingCapability?.available ? (
+                <div className="flex gap-2">
+                  <Database className="h-4 w-4 text-emerald-600 dark:text-emerald-400 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-medium text-emerald-800 dark:text-emerald-200">
+                      Semantic search available via {embeddingCapability.provider}
+                    </p>
+                    <p className="text-emerald-700 dark:text-emerald-300 mt-0.5">
+                      This agent can search the indexed codebase for semantically related code when reviewing PRs.
+                      Index your repositories in the Repositories tab to enable this.
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex gap-2">
+                  <FileSearch className="h-4 w-4 text-orange-600 dark:text-orange-400 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-medium text-orange-800 dark:text-orange-200">
+                      Limited to file search tools
+                    </p>
+                    <p className="text-orange-700 dark:text-orange-300 mt-0.5">
+                      Add an OpenAI or Google API key in the Providers tab to enable semantic search on indexed repositories.
+                      Without embeddings, this agent uses grep and file reading to find related code.
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* Enable/Disable Toggle */}
           <div className="flex items-center justify-between">
             <div>
               <Label htmlFor={`${agent.agent_type}-enabled`}>Enable Agent</Label>
               <p className="text-xs text-muted-foreground">
-                Disabled agents won't run during PR analysis
+                {isResearchAgent
+                  ? "When enabled, other agents can spawn this agent to investigate the codebase"
+                  : "Disabled agents won't run during PR analysis"}
               </p>
             </div>
             <button
@@ -179,10 +247,14 @@ function AgentCard({ agent, settings, availableModels, onSave, isSaving }: Agent
               onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setModelOverride(e.target.value)}
             >
               <option value="">Use default model</option>
-              {availableModels.map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.name}
-                </option>
+              {providerModels.map((pg) => (
+                <optgroup key={pg.provider} label={pg.provider.charAt(0).toUpperCase() + pg.provider.slice(1)}>
+                  {pg.models.map((model) => (
+                    <option key={`${pg.provider}:${model.id}`} value={model.id}>
+                      {model.name}
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </select>
             <p className="text-xs text-muted-foreground">
@@ -265,23 +337,45 @@ export function Agents() {
     queryFn: () => agents.getSettings(),
   });
 
-  // Fetch available models from active provider
-  const { data: availableModels } = useQuery({
-    queryKey: ["agents", "models"],
+  // Fetch available models from ALL configured providers (not just active)
+  const { data: providerModels } = useQuery({
+    queryKey: ["agents", "models", "all-providers"],
     queryFn: async () => {
       try {
-        // Get the active provider and fetch its models
         const providers = await settings.getAIProviders();
-        const activeProvider = providers.find((p) => p.is_active);
-        if (activeProvider) {
-          const models = await settings.fetchModelsForProvider(activeProvider.provider);
-          return models.map((m) => ({ id: m.id, name: m.name }));
+        const results: ProviderModels[] = [];
+
+        // Fetch models from each configured provider in parallel
+        const fetches = providers.map(async (p) => {
+          try {
+            const models = await settings.fetchModelsForProvider(p.provider);
+            return {
+              provider: p.provider,
+              models: models.map((m) => ({ id: m.id, name: m.name })),
+            };
+          } catch {
+            return { provider: p.provider, models: [] };
+          }
+        });
+
+        const allResults = await Promise.all(fetches);
+        for (const r of allResults) {
+          if (r.models.length > 0) {
+            results.push(r);
+          }
         }
-        return [];
+
+        return results;
       } catch {
         return [];
       }
     },
+  });
+
+  // Fetch embedding capability for research agent
+  const { data: embeddingCapability } = useQuery({
+    queryKey: ["agents", "embedding-capability"],
+    queryFn: () => agents.getEmbeddingCapability(),
   });
 
   const saveMutation = useMutation({
@@ -330,6 +424,8 @@ export function Agents() {
   const getSettingsForAgent = (agentType: string) =>
     agentSettings?.find((s) => s.agent_type === agentType);
 
+  const hasAnyModels = providerModels && providerModels.length > 0;
+
   return (
     <div className="space-y-6 max-w-2xl">
       <div>
@@ -339,7 +435,7 @@ export function Agents() {
         </p>
       </div>
 
-      {!availableModels?.length && (
+      {!hasAnyModels && (
         <Card className="border-amber-200 dark:border-amber-900 bg-amber-50 dark:bg-amber-950/20">
           <CardContent className="pt-4">
             <div className="flex gap-3">
@@ -365,6 +461,7 @@ export function Agents() {
           </CardTitle>
           <CardDescription>
             Configure model selection, enable/disable agents, and customize system prompts.
+            Models from all configured providers are available for selection.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
@@ -373,7 +470,8 @@ export function Agents() {
               key={agent.agent_type}
               agent={agent}
               settings={getSettingsForAgent(agent.agent_type)}
-              availableModels={availableModels || []}
+              providerModels={providerModels || []}
+              embeddingCapability={agent.agent_type === "research" ? embeddingCapability : undefined}
               onSave={handleSave}
               isSaving={savingAgent === agent.agent_type}
             />

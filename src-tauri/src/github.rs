@@ -362,30 +362,47 @@ impl GitHubClient {
         Ok(response.json().await?)
     }
 
-    /// Get files changed in a pull request
+    /// Get files changed in a pull request (with pagination)
     pub async fn get_pr_files(&self, token: &str, owner: &str, repo: &str, pr_number: i64) -> AppResult<Vec<GitHubFile>> {
-        let url = format!(
-            "https://api.github.com/repos/{}/{}/pulls/{}/files",
-            owner, repo, pr_number
-        );
+        let mut all_files = Vec::new();
+        let mut page = 1;
 
-        let response = self
-            .client
-            .get(&url)
-            .header("Authorization", format!("Bearer {}", token))
-            .header("Accept", "application/vnd.github.v3+json")
-            .header("User-Agent", "SiftPR")
-            .send()
-            .await?;
+        loop {
+            let url = format!(
+                "https://api.github.com/repos/{}/{}/pulls/{}/files?per_page=100&page={}",
+                owner, repo, pr_number, page
+            );
 
-        if !response.status().is_success() {
-            return Err(AppError::GitHub(format!(
-                "Failed to get PR files: {}",
-                response.status()
-            )));
+            let response = self
+                .client
+                .get(&url)
+                .header("Authorization", format!("Bearer {}", token))
+                .header("Accept", "application/vnd.github.v3+json")
+                .header("User-Agent", "SiftPR")
+                .send()
+                .await?;
+
+            if !response.status().is_success() {
+                return Err(AppError::GitHub(format!(
+                    "Failed to get PR files: {}",
+                    response.status()
+                )));
+            }
+
+            let files: Vec<GitHubFile> = response.json().await?;
+            if files.is_empty() {
+                break;
+            }
+            all_files.extend(files);
+            page += 1;
+
+            // Safety limit: GitHub caps at 3000 files per PR
+            if page > 30 {
+                break;
+            }
         }
 
-        Ok(response.json().await?)
+        Ok(all_files)
     }
 
     /// Get reviews for a pull request

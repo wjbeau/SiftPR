@@ -7,40 +7,12 @@ use std::sync::Arc;
 
 use super::BuiltinTool;
 use crate::ai::client::AIClient;
+use crate::ai::prompts;
 use crate::ai::tools::formatter::get_formatter;
 use crate::ai::tools::{ToolContext, ToolDefinition, ToolExecutionConfig, ToolResult, ToolSource};
+use crate::ai::types::AgentType;
 use crate::db::Database;
 use crate::error::{AppError, AppResult};
-
-const RESEARCH_SYSTEM_PROMPT: &str = r#"You are a research agent tasked with exploring a codebase to answer specific questions.
-
-Your goal is to thoroughly investigate the question using the available tools and provide a comprehensive answer.
-
-## Available Tools
-- `search_repo`: Search for patterns in the codebase using regex
-- `read_file`: Read specific files to understand their contents
-
-## Guidelines
-1. Start by searching for relevant patterns, function names, or keywords
-2. Read files that seem relevant to the question
-3. Follow references and imports to build a complete picture
-4. Be thorough but efficient - don't read unnecessary files
-
-## Response Format
-After your investigation, provide a clear answer in this JSON format:
-{
-  "answer": "Your comprehensive answer to the question",
-  "confidence": 0.0 to 1.0,
-  "sources": [
-    {
-      "file": "path/to/file",
-      "relevance": "Why this file is relevant",
-      "key_findings": "What you found in this file"
-    }
-  ],
-  "additional_context": "Any extra context that might be helpful"
-}
-"#;
 
 #[derive(Debug, Deserialize)]
 struct ResearchArgs {
@@ -78,7 +50,19 @@ impl ResearchAgentTool {
     async fn get_research_config(&self, context: &ToolContext) -> AppResult<ResearchConfig> {
         let db = Database::new()?;
 
-        // Get research agent settings
+        // Check if the research agent is disabled via agent_settings
+        let agent_settings = db.get_agent_settings(&context.user_id)?;
+        let research_setting = agent_settings.iter().find(|s| s.agent_type == "research");
+
+        if let Some(setting) = research_setting {
+            if !setting.enabled {
+                return Err(AppError::ToolExecution(
+                    "Research agent is disabled. Enable it in Settings > Agents.".to_string(),
+                ));
+            }
+        }
+
+        // Get research agent settings (legacy table for iterations/timeout)
         let settings = db.get_research_agent_settings(&context.user_id)?;
 
         // Get active AI provider for fallback model
@@ -86,10 +70,15 @@ impl ResearchAgentTool {
             .get_active_ai_setting(&context.user_id)?
             .ok_or_else(|| AppError::NotFound("No active AI provider".to_string()))?;
 
-        let model = settings
-            .as_ref()
-            .and_then(|s| s.model_preference.clone())
+        // Use model override from agent_settings first, then research_agent_settings, then default
+        let model = research_setting
+            .and_then(|s| s.model_override.clone())
+            .or_else(|| settings.as_ref().and_then(|s| s.model_preference.clone()))
             .unwrap_or_else(|| ai_settings.model_preference.clone());
+
+        // Use custom prompt from agent_settings if available
+        let custom_prompt = research_setting
+            .and_then(|s| s.custom_prompt.clone());
 
         let max_iterations = settings
             .as_ref()
@@ -101,12 +90,18 @@ impl ResearchAgentTool {
             .map(|s| s.timeout_seconds)
             .unwrap_or(120);
 
+        // Check if semantic search is available (embedding provider configured)
+        let has_embeddings = db.get_embedding_provider(&context.user_id)?
+            .is_some();
+
         Ok(ResearchConfig {
             provider: ai_settings.provider,
             api_key,
             model,
             max_iterations,
             timeout_seconds,
+            custom_prompt,
+            has_embeddings,
         })
     }
 
@@ -120,11 +115,17 @@ impl ResearchAgentTool {
     ) -> AppResult<String> {
         let formatter = get_formatter(&config.provider);
 
-        // Build the research-specific tools (only search_repo and read_file)
-        let tools = vec![
+        // Build the research-specific tools
+        let mut tools = vec![
             super::search_repo::SearchRepoTool::new().definition(),
             super::read_file::ReadFileTool::new().definition(),
         ];
+
+        // Add semantic_search when embeddings are available and repo is indexed
+        if config.has_embeddings && tool_context.repo_full_name.is_some() {
+            tools.push(super::semantic_search::SemanticSearchTool::new().definition());
+        }
+
         let tools_json = formatter.format_tools(&tools);
 
         // Build the user prompt
@@ -162,9 +163,15 @@ impl ResearchAgentTool {
         let mut iterations = 0;
         let mut total_tool_calls = 0;
 
+        // Use custom prompt if configured, otherwise the shared default from prompts.rs
+        let default_prompt = prompts::get_system_prompt(AgentType::Research);
+        let system_prompt = config.custom_prompt.as_deref()
+            .unwrap_or(default_prompt);
+
         // Create a mini tool registry with only the allowed tools
         let search_tool = super::search_repo::SearchRepoTool::new();
         let read_tool = super::read_file::ReadFileTool::new();
+        let semantic_tool = super::semantic_search::SemanticSearchTool::new();
 
         loop {
             // Check limits
@@ -193,7 +200,7 @@ impl ResearchAgentTool {
                     &config.provider,
                     &config.api_key,
                     &config.model,
-                    RESEARCH_SYSTEM_PROMPT,
+                    system_prompt,
                     &messages,
                     &tools_json,
                 )
@@ -225,6 +232,9 @@ impl ResearchAgentTool {
                     }
                     "read_file" => {
                         read_tool.execute(call.arguments.clone(), tool_context).await
+                    }
+                    "semantic_search" if config.has_embeddings => {
+                        semantic_tool.execute(call.arguments.clone(), tool_context).await
                     }
                     _ => Ok(ToolResult::error(
                         call.id.clone(),
@@ -357,6 +367,8 @@ struct ResearchConfig {
     model: String,
     max_iterations: u32,
     timeout_seconds: u32,
+    custom_prompt: Option<String>,
+    has_embeddings: bool,
 }
 
 #[async_trait]

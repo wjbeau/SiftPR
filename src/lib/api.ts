@@ -164,6 +164,20 @@ export interface FileAnalysis {
   agent_findings: AgentFinding[];
 }
 
+// File grouping types (Issue 4)
+export interface FileGroup {
+  name: string;
+  description: string;
+  importance: string; // "high" | "medium" | "low"
+  files: GroupedFile[];
+}
+
+export interface GroupedFile {
+  filename: string;
+  deprioritized: boolean;
+  reason: string | null;
+}
+
 export interface OrchestratedAnalysis {
   summary: string;
   risk_level: string;
@@ -176,6 +190,7 @@ export interface OrchestratedAnalysis {
   failed_agents: FailedAgent[];
   total_processing_time_ms: number;
   total_token_usage: TokenUsage;
+  file_groups?: FileGroup[];
 }
 
 // Auth API
@@ -402,6 +417,10 @@ export const agents = {
       enabled,
     }),
   getDefaults: () => invoke<AgentInfo[]>("agents_get_defaults"),
+  getEmbeddingCapability: () =>
+    invoke<{ available: boolean; provider: string | null }>(
+      "agents_get_embedding_capability"
+    ),
 };
 
 // Service Keys (for SerpAPI, etc.)
@@ -510,6 +529,34 @@ export const researchAgent = {
     }),
 };
 
+// Draft Comments
+export interface DraftComment {
+  id: string;
+  user_id: string;
+  repo_owner: string;
+  repo_name: string;
+  pr_number: number;
+  file_path: string;
+  line_start: number;
+  line_end: number;
+  body: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export const draftComments = {
+  save: (owner: string, repo: string, prNumber: number, filePath: string, lineStart: number, lineEnd: number, body: string) =>
+    invoke<DraftComment>("draft_comments_save", { owner, repo, prNumber, filePath, lineStart, lineEnd, body }),
+  get: (owner: string, repo: string, prNumber: number) =>
+    invoke<DraftComment[]>("draft_comments_get", { owner, repo, prNumber }),
+  update: (id: string, body: string) =>
+    invoke<void>("draft_comments_update", { id, body }),
+  delete: (id: string) =>
+    invoke<void>("draft_comments_delete", { id }),
+  clear: (owner: string, repo: string, prNumber: number) =>
+    invoke<void>("draft_comments_clear", { owner, repo, prNumber }),
+};
+
 // Codebase Indexing Types
 export type IndexStatus = "pending" | "indexing" | "complete" | "failed";
 export type ChunkType = "function" | "method" | "class" | "struct" | "interface" | "enum" | "trait" | "module";
@@ -524,6 +571,9 @@ export interface CodebaseIndexStatus {
   total_chunks: number;
   index_status: IndexStatus;
   error_message: string | null;
+  files_total: number;
+  files_processed: number;
+  chunks_processed: number;
   created_at: string;
   updated_at: string;
 }

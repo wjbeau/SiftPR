@@ -24,6 +24,8 @@ impl Database {
         }
 
         let conn = Connection::open(&db_path)?;
+        // Enable WAL mode for better concurrent read/write performance
+        conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         let db = Self {
             conn: Mutex::new(conn),
         };
@@ -236,11 +238,41 @@ impl Database {
                 created_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS draft_comments (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id),
+                repo_owner TEXT NOT NULL,
+                repo_name TEXT NOT NULL,
+                pr_number INTEGER NOT NULL,
+                file_path TEXT NOT NULL,
+                line_start INTEGER NOT NULL,
+                line_end INTEGER NOT NULL,
+                body TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_draft_comments_lookup ON draft_comments(user_id, repo_owner, repo_name, pr_number);
+
             CREATE INDEX IF NOT EXISTS idx_chunk_metadata_index_id ON chunk_metadata(index_id);
             CREATE INDEX IF NOT EXISTS idx_chunk_metadata_name ON chunk_metadata(name);
             CREATE INDEX IF NOT EXISTS idx_chunk_metadata_file_path ON chunk_metadata(file_path);
             "#,
         )?;
+
+        // Migrations for codebase_indexes progress columns
+        let _ = conn.execute(
+            "ALTER TABLE codebase_indexes ADD COLUMN files_total INTEGER DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE codebase_indexes ADD COLUMN files_processed INTEGER DEFAULT 0",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE codebase_indexes ADD COLUMN chunks_processed INTEGER DEFAULT 0",
+            [],
+        );
 
         Ok(())
     }
@@ -521,6 +553,31 @@ impl Database {
         } else {
             Ok(None)
         }
+    }
+
+    /// Find the best configured provider that supports embeddings.
+    /// Preference order: openai > google > voyage/anthropic.
+    /// Falls back to the active provider if none of the preferred ones are configured.
+    pub fn get_embedding_provider(&self, user_id: &str) -> AppResult<Option<(String, String)>> {
+        let conn = self.conn.lock().unwrap();
+
+        // Providers that support embeddings, in preference order
+        let embedding_providers = ["openai", "google"];
+
+        for provider in &embedding_providers {
+            let result: Option<String> = conn.query_row(
+                "SELECT api_key FROM user_ai_settings WHERE user_id = ?1 AND provider = ?2",
+                params![user_id, provider],
+                |row| row.get(0),
+            ).optional()?;
+
+            if let Some(encrypted_key) = result {
+                let api_key = decrypt(&encrypted_key)?;
+                return Ok(Some((provider.to_string(), api_key)));
+            }
+        }
+
+        Ok(None)
     }
 
     pub fn get_ai_setting_api_key(&self, setting_id: &str) -> AppResult<String> {
@@ -1183,6 +1240,9 @@ impl Database {
             total_chunks: 0,
             index_status: IndexStatus::Pending,
             error_message: None,
+            files_total: 0,
+            files_processed: 0,
+            chunks_processed: 0,
             created_at: now.clone(),
             updated_at: now,
         })
@@ -1191,7 +1251,7 @@ impl Database {
     pub fn get_codebase_index(&self, user_id: &str, repo_full_name: &str) -> AppResult<Option<CodebaseIndex>> {
         let conn = self.conn.lock().unwrap();
         let result = conn.query_row(
-            "SELECT id, user_id, repo_full_name, local_path, last_indexed_commit, embedding_provider, embedding_model, embedding_dimensions, total_chunks, index_status, error_message, created_at, updated_at
+            "SELECT id, user_id, repo_full_name, local_path, last_indexed_commit, embedding_provider, embedding_model, embedding_dimensions, total_chunks, index_status, error_message, created_at, updated_at, COALESCE(files_total, 0), COALESCE(files_processed, 0), COALESCE(chunks_processed, 0)
              FROM codebase_indexes WHERE user_id = ?1 AND repo_full_name = ?2",
             params![user_id, repo_full_name],
             |row| {
@@ -1208,6 +1268,9 @@ impl Database {
                     total_chunks: row.get(8)?,
                     index_status: IndexStatus::from_str(&status_str),
                     error_message: row.get(10)?,
+                    files_total: row.get(13)?,
+                    files_processed: row.get(14)?,
+                    chunks_processed: row.get(15)?,
                     created_at: row.get(11)?,
                     updated_at: row.get(12)?,
                 })
@@ -1236,6 +1299,18 @@ impl Database {
         conn.execute(
             "UPDATE codebase_indexes SET index_status = 'complete', last_indexed_commit = ?1, total_chunks = ?2, error_message = NULL, updated_at = ?3 WHERE id = ?4",
             params![commit_sha, total_chunks, now, index_id],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn update_index_progress(&self, index_id: &str, files_total: u32, files_processed: u32, chunks_processed: u32) -> AppResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+
+        conn.execute(
+            "UPDATE codebase_indexes SET files_total = ?1, files_processed = ?2, chunks_processed = ?3, updated_at = ?4 WHERE id = ?5",
+            params![files_total, files_processed, chunks_processed, now, index_id],
         )?;
 
         Ok(())
@@ -1400,6 +1475,112 @@ impl Database {
 
         Ok(chunks)
     }
+
+    // Draft comment operations
+
+    pub fn save_draft_comment(
+        &self,
+        user_id: &str,
+        owner: &str,
+        repo: &str,
+        pr_number: i64,
+        file_path: &str,
+        line_start: i64,
+        line_end: i64,
+        body: &str,
+    ) -> AppResult<DraftComment> {
+        let conn = self.conn.lock().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+
+        conn.execute(
+            r#"
+            INSERT INTO draft_comments (id, user_id, repo_owner, repo_name, pr_number, file_path, line_start, line_end, body, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+            "#,
+            params![id, user_id, owner, repo, pr_number, file_path, line_start, line_end, body, now],
+        )?;
+
+        Ok(DraftComment {
+            id,
+            user_id: user_id.to_string(),
+            repo_owner: owner.to_string(),
+            repo_name: repo.to_string(),
+            pr_number,
+            file_path: file_path.to_string(),
+            line_start,
+            line_end,
+            body: body.to_string(),
+            created_at: now.clone(),
+            updated_at: now,
+        })
+    }
+
+    pub fn get_draft_comments(
+        &self,
+        user_id: &str,
+        owner: &str,
+        repo: &str,
+        pr_number: i64,
+    ) -> AppResult<Vec<DraftComment>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, user_id, repo_owner, repo_name, pr_number, file_path, line_start, line_end, body, created_at, updated_at
+             FROM draft_comments WHERE user_id = ?1 AND repo_owner = ?2 AND repo_name = ?3 AND pr_number = ?4
+             ORDER BY created_at ASC"
+        )?;
+
+        let comments = stmt.query_map(params![user_id, owner, repo, pr_number], |row| {
+            Ok(DraftComment {
+                id: row.get(0)?,
+                user_id: row.get(1)?,
+                repo_owner: row.get(2)?,
+                repo_name: row.get(3)?,
+                pr_number: row.get(4)?,
+                file_path: row.get(5)?,
+                line_start: row.get(6)?,
+                line_end: row.get(7)?,
+                body: row.get(8)?,
+                created_at: row.get(9)?,
+                updated_at: row.get(10)?,
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+
+        Ok(comments)
+    }
+
+    pub fn update_draft_comment(&self, id: &str, body: &str) -> AppResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+
+        conn.execute(
+            "UPDATE draft_comments SET body = ?1, updated_at = ?2 WHERE id = ?3",
+            params![body, now, id],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn delete_draft_comment(&self, id: &str) -> AppResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM draft_comments WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
+    pub fn clear_draft_comments(
+        &self,
+        user_id: &str,
+        owner: &str,
+        repo: &str,
+        pr_number: i64,
+    ) -> AppResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM draft_comments WHERE user_id = ?1 AND repo_owner = ?2 AND repo_name = ?3 AND pr_number = ?4",
+            params![user_id, owner, repo, pr_number],
+        )?;
+        Ok(())
+    }
 }
 
 fn get_database_path() -> AppResult<PathBuf> {
@@ -1437,6 +1618,21 @@ pub struct PRReviewState {
     pub pr_number: i64,
     pub last_reviewed_commit: String,
     pub viewed_files: Vec<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DraftComment {
+    pub id: String,
+    pub user_id: String,
+    pub repo_owner: String,
+    pub repo_name: String,
+    pub pr_number: i64,
+    pub file_path: String,
+    pub line_start: i64,
+    pub line_end: i64,
+    pub body: String,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -1550,6 +1746,9 @@ pub struct CodebaseIndex {
     pub total_chunks: u32,
     pub index_status: IndexStatus,
     pub error_message: Option<String>,
+    pub files_total: u32,
+    pub files_processed: u32,
+    pub chunks_processed: u32,
     pub created_at: String,
     pub updated_at: String,
 }

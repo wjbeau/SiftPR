@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use tauri::State;
 
 use ai::{AIClient, MCPManager, MCPTool, ModelInfo, OrchestratedAnalysis, Orchestrator, prompts, types::AgentType, orchestrator::{AgentConfig, ToolConfig}, tools::ToolExecutionConfig};
-use db::{AISettings, AgentSettings, CodebaseProfile, Database, LinkedRepo, PRReviewState, User};
+use db::{AISettings, AgentSettings, CodebaseProfile, Database, DraftComment, LinkedRepo, PRReviewState, User};
 use error::{AppError, AppResult};
 use github::{GitHubClient, GitHubFile, GitHubPR, GitHubRepo, OAuthTokens};
 
@@ -726,6 +726,10 @@ pub struct IndexStatus {
     pub last_indexed_commit: Option<String>,
     pub total_chunks: u32,
     pub error_message: Option<String>,
+    pub files_total: u32,
+    pub files_processed: u32,
+    pub chunks_processed: u32,
+    pub updated_at: String,
 }
 
 #[tauri::command]
@@ -734,25 +738,27 @@ async fn codebase_index_start(
     state: State<'_, Mutex<AppState>>,
 ) -> AppResult<()> {
     // Get user and linked repo info
-    let (user_id, local_path, embedding_provider, embedding_model, api_key) = {
+    let (user_id, local_path, embedding_provider, api_key) = {
         let app = state.lock().unwrap();
         let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
 
         let linked = app.db.get_linked_repo(&user.id, &repo_full_name)?
             .ok_or_else(|| AppError::Internal(format!("Repository not linked: {}", repo_full_name)))?;
 
-        // Get active AI provider for embeddings
-        let (settings, key) = app.db.get_active_ai_setting(&user.id)?
-            .ok_or_else(|| AppError::AIProvider("No active AI provider configured".to_string()))?;
+        // Find the best configured provider that supports embeddings (openai > google)
+        // This is decoupled from the active review AI provider
+        let (provider, key) = app.db.get_embedding_provider(&user.id)?
+            .ok_or_else(|| AppError::AIProvider(
+                "No embedding-capable AI provider configured. Add an OpenAI or Google API key in Settings to enable indexing.".to_string()
+            ))?;
 
-        (user.id, linked.local_path, settings.provider, settings.model_preference, key)
+        (user.id, linked.local_path, provider, key)
     };
 
     // Determine embedding model based on provider
     let embed_model = match embedding_provider.as_str() {
         "openai" => "text-embedding-3-small",
-        "google" => "text-embedding-004",
-        "anthropic" | "voyage" => "voyage-code-3",
+        "google" => "gemini-embedding-001",
         _ => "text-embedding-3-small",
     };
 
@@ -763,7 +769,7 @@ async fn codebase_index_start(
         db::Database::new()?
     };
 
-    indexer::index_repository(
+    let result = indexer::index_repository(
         &db,
         &user_id,
         &repo_full_name,
@@ -771,8 +777,21 @@ async fn codebase_index_start(
         &embedding_provider,
         embed_model,
         &api_key,
-    ).await?;
+    ).await;
 
+    if let Err(ref e) = result {
+        // Update DB status to "failed" so the UI can display the error
+        // instead of leaving it stuck at "pending" or "indexing"
+        if let Ok(Some(index)) = db.get_codebase_index(&user_id, &repo_full_name) {
+            let _ = db.update_index_status(
+                &index.id,
+                crate::db::IndexStatus::Failed,
+                Some(&e.to_string()),
+            );
+        }
+    }
+
+    result?;
     Ok(())
 }
 
@@ -791,6 +810,10 @@ fn codebase_index_status(
         last_indexed_commit: idx.last_indexed_commit,
         total_chunks: idx.total_chunks,
         error_message: idx.error_message,
+        files_total: idx.files_total,
+        files_processed: idx.files_processed,
+        chunks_processed: idx.chunks_processed,
+        updated_at: idx.updated_at,
     }))
 }
 
@@ -812,10 +835,12 @@ async fn codebase_semantic_search(
             return Err(AppError::Indexing("Index is not complete".to_string()));
         }
 
-        let (settings, key) = app.db.get_active_ai_setting(&user.id)?
-            .ok_or_else(|| AppError::AIProvider("No active AI provider configured".to_string()))?;
+        let (provider, key) = app.db.get_embedding_provider(&user.id)?
+            .ok_or_else(|| AppError::AIProvider(
+                "No embedding-capable AI provider configured. Add an OpenAI or Google API key in Settings.".to_string()
+            ))?;
 
-        (index.id, settings.provider, key)
+        (index.id, provider, key)
     };
 
     // Get embedding provider
@@ -825,8 +850,7 @@ async fn codebase_semantic_search(
     // Determine embedding model
     let embed_model = match embedding_provider.as_str() {
         "openai" => "text-embedding-3-small",
-        "google" => "text-embedding-004",
-        "anthropic" | "voyage" => "voyage-code-3",
+        "google" => "gemini-embedding-001",
         _ => "text-embedding-3-small",
     };
 
@@ -917,7 +941,38 @@ fn agents_get_defaults() -> Vec<AgentInfo> {
             description: "Identifies performance issues and optimization opportunities".to_string(),
             default_prompt: prompts::get_system_prompt(AgentType::Performance).to_string(),
         },
+        AgentInfo {
+            agent_type: "research".to_string(),
+            name: "Research Agent".to_string(),
+            description: "Researches the codebase to provide context about how changes impact related code".to_string(),
+            default_prompt: prompts::get_system_prompt(AgentType::Research).to_string(),
+        },
     ]
+}
+
+#[derive(serde::Serialize)]
+pub struct EmbeddingCapability {
+    pub available: bool,
+    pub provider: Option<String>,
+}
+
+#[tauri::command]
+fn agents_get_embedding_capability(
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<EmbeddingCapability> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+
+    match app.db.get_embedding_provider(&user.id)? {
+        Some((provider, _)) => Ok(EmbeddingCapability {
+            available: true,
+            provider: Some(provider),
+        }),
+        None => Ok(EmbeddingCapability {
+            available: false,
+            provider: None,
+        }),
+    }
 }
 
 // Service Keys commands (for SerpAPI, etc.)
@@ -1061,6 +1116,69 @@ fn research_agent_save_settings(
     )
 }
 
+// Draft comment commands
+
+#[tauri::command]
+fn draft_comments_save(
+    owner: String,
+    repo: String,
+    pr_number: i64,
+    file_path: String,
+    line_start: i64,
+    line_end: i64,
+    body: String,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<DraftComment> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+    app.db.save_draft_comment(&user.id, &owner, &repo, pr_number, &file_path, line_start, line_end, &body)
+}
+
+#[tauri::command]
+fn draft_comments_get(
+    owner: String,
+    repo: String,
+    pr_number: i64,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<Vec<DraftComment>> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+    app.db.get_draft_comments(&user.id, &owner, &repo, pr_number)
+}
+
+#[tauri::command]
+fn draft_comments_update(
+    id: String,
+    body: String,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<()> {
+    let app = state.lock().unwrap();
+    let _user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+    app.db.update_draft_comment(&id, &body)
+}
+
+#[tauri::command]
+fn draft_comments_delete(
+    id: String,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<()> {
+    let app = state.lock().unwrap();
+    let _user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+    app.db.delete_draft_comment(&id)
+}
+
+#[tauri::command]
+fn draft_comments_clear(
+    owner: String,
+    repo: String,
+    pr_number: i64,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<()> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+    app.db.clear_draft_comments(&user.id, &owner, &repo, pr_number)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let db = Database::new().expect("Failed to initialize database");
@@ -1113,6 +1231,7 @@ pub fn run() {
             agents_get_settings,
             agents_save_setting,
             agents_get_defaults,
+            agents_get_embedding_capability,
             service_keys_get,
             service_keys_set,
             service_keys_delete,
@@ -1123,6 +1242,11 @@ pub fn run() {
             mcp_test_server,
             research_agent_get_settings,
             research_agent_save_settings,
+            draft_comments_save,
+            draft_comments_get,
+            draft_comments_update,
+            draft_comments_delete,
+            draft_comments_clear,
         ])
         .setup(|app| {
             #[cfg(desktop)]

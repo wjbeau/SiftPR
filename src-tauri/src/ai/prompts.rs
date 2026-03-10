@@ -7,6 +7,7 @@ pub fn get_system_prompt(agent_type: AgentType) -> &'static str {
         AgentType::Architecture => ARCHITECTURE_AGENT_PROMPT,
         AgentType::Style => STYLE_AGENT_PROMPT,
         AgentType::Performance => PERFORMANCE_AGENT_PROMPT,
+        AgentType::Research => RESEARCH_AGENT_PROMPT,
     }
 }
 
@@ -93,6 +94,44 @@ For each finding, provide:
 - Severity assessment (critical, high, medium, low, info)
 - Suggested optimization or alternative approach"#;
 
+const RESEARCH_AGENT_PROMPT: &str = r#"You are a research agent that answers specific questions about a codebase on behalf of other code review agents.
+
+Another agent has a question it cannot answer from the PR diff alone. Your job is to investigate the codebase, find the answer, and report back with concrete evidence. You are not doing a general review — you are answering a specific question.
+
+## Available Tools
+- `search_repo`: Search for patterns in the codebase using regex
+- `read_file`: Read specific files to understand their contents
+- `semantic_search`: Search the indexed codebase for semantically related code (only available if the repository has been indexed)
+
+## How to Work
+1. Read the question carefully. Understand exactly what the calling agent needs to know.
+2. Plan your investigation — what would you search for to answer this?
+3. If `semantic_search` is available, use it first for broad discovery (e.g., "how is authentication handled", "error handling patterns").
+4. Use `search_repo` for precise lookups — function names, class references, import paths, specific strings.
+5. Use `read_file` to examine the actual code once you've located relevant files.
+6. Follow the trail: check imports, callers, implementations, and tests until you can confidently answer.
+7. Stop as soon as you have enough evidence. Don't exhaustively read every file.
+
+## What Makes a Good Answer
+- Directly addresses the question asked — don't provide tangential information
+- Cites specific files, line ranges, and code snippets as evidence
+- States your confidence level honestly — say "I couldn't find X" rather than guessing
+- Highlights anything surprising or contradictory you discovered
+
+## Response Format
+{
+  "answer": "Direct, specific answer to the question with evidence",
+  "confidence": 0.0 to 1.0,
+  "sources": [
+    {
+      "file": "path/to/file",
+      "relevance": "Why this file answers the question",
+      "key_findings": "The specific code/pattern found here"
+    }
+  ],
+  "additional_context": "Anything the calling agent should also be aware of"
+}"#;
+
 /// Build the user prompt for an agent with PR context
 pub fn build_agent_prompt(
     agent_type: AgentType,
@@ -106,6 +145,7 @@ pub fn build_agent_prompt(
         AgentType::Architecture => "Focus ONLY on architectural patterns and design issues.",
         AgentType::Style => "Focus ONLY on code style, naming, and consistency.",
         AgentType::Performance => "Focus ONLY on performance issues and optimizations.",
+        AgentType::Research => "Focus on researching the codebase to find related code, usage patterns, and dependencies of the changed files. Report findings about how changes impact the broader codebase.",
     };
 
     let codebase_section = codebase_context
@@ -160,6 +200,63 @@ Important:
         files = files_context,
         focus_reminder = focus_reminder,
         codebase_section = codebase_section,
+    )
+}
+
+/// Build a prompt for grouping files by functional area
+pub fn build_grouping_prompt(
+    files: &[crate::github::GitHubFile],
+    pr_title: &str,
+    pr_body: Option<&str>,
+    summary: &str,
+) -> String {
+    let file_list: String = files
+        .iter()
+        .map(|f| format!("- {} ({}, +{} -{})", f.filename, f.status, f.additions, f.deletions))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    format!(
+        r#"Group the following PR files into functional areas for code review.
+
+## PR Title
+{title}
+
+## PR Description
+{description}
+
+## Analysis Summary
+{summary}
+
+## Files
+{files}
+
+Respond with ONLY a JSON array of file groups. Each group represents a functional concern (e.g., "Authentication flow", "Database schema", "API endpoints", "UI components").
+
+Rules:
+- Group files by what they functionally accomplish together, NOT by directory
+- Each file must appear in exactly one group
+- Mark test files, config files, generated code, lock files, and boilerplate as "deprioritized": true
+- Rank groups by review importance: "high" for core logic changes, "medium" for supporting changes, "low" for config/docs/tests-only groups
+- Keep group names concise (2-4 words)
+- Provide a brief reason for why each file is in its group
+
+JSON format:
+[
+  {{
+    "name": "Group Name",
+    "description": "Brief explanation of this functional area",
+    "importance": "high",
+    "files": [
+      {{ "filename": "path/to/file.ts", "deprioritized": false, "reason": "Core handler for X" }},
+      {{ "filename": "path/to/file.test.ts", "deprioritized": true, "reason": "Tests for X handler" }}
+    ]
+  }}
+]"#,
+        title = pr_title,
+        description = pr_body.unwrap_or("No description provided"),
+        summary = summary,
+        files = file_list,
     )
 }
 

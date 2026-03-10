@@ -7,12 +7,12 @@ use crate::error::{AppError, AppResult};
 use crate::github::GitHubFile;
 
 use super::client::AIClient;
-use super::prompts::{build_agent_prompt, build_files_context, get_system_prompt};
+use super::prompts::{build_agent_prompt, build_files_context, build_grouping_prompt, get_system_prompt};
 use super::tools::{ToolContext, ToolExecutionConfig, ToolExecutor};
 use super::types::{
     AgentResponse, AgentSummary, AgentType, AnnotationType, FailedAgent,
-    FileAnalysis, FileContext, FilePriority, KeyChange, LineAnnotation, OrchestratedAnalysis,
-    PRCategory, RawAgentResponse, Severity, TokenUsage,
+    FileAnalysis, FileContext, FileGroup, FilePriority, GroupedFile, KeyChange, LineAnnotation,
+    OrchestratedAnalysis, PRCategory, RawAgentResponse, Severity, TokenUsage,
 };
 
 const AGENT_TIMEOUT_SECS: u64 = 60;
@@ -94,6 +94,7 @@ impl Orchestrator {
                 AgentConfig::default_for(AgentType::Performance),
             ])
             .into_iter()
+            .filter(|c| c.agent_type != AgentType::Research) // Research agent is a tool, not a top-level agent
             .map(|c| (c.agent_type, c))
             .collect();
 
@@ -110,6 +111,8 @@ impl Orchestrator {
         let tool_config_ref = tool_config.as_ref();
 
         // Run enabled agents in parallel
+        // Note: The research agent is available as a tool (spawn_research_agent) that
+        // any analysis agent can call on demand to investigate the codebase.
         let (security_result, architecture_result, style_result, performance_result) = tokio::join!(
             self.run_agent_if_enabled(
                 &security_config,
@@ -193,12 +196,34 @@ impl Orchestrator {
         }
 
         // Aggregate results
-        let analysis = self.aggregate_responses(
+        let mut analysis = self.aggregate_responses(
             &agent_responses,
             &failed_agents,
             files,
             start_time.elapsed().as_millis() as u64,
         );
+
+        // Run file grouping as a lightweight follow-up call
+        let model = configs.values()
+            .find(|c| c.enabled)
+            .and_then(|c| c.model_override.as_deref())
+            .unwrap_or(default_model);
+
+        match timeout(
+            Duration::from_secs(15),
+            self.run_file_grouping(provider, api_key, model, files, pr_title, pr_body, &analysis.summary),
+        ).await {
+            Ok(Ok(groups)) => {
+                println!("[AI] File grouping succeeded with {} groups", groups.len());
+                analysis.file_groups = groups;
+            }
+            Ok(Err(e)) => {
+                println!("[AI] File grouping failed: {}", e);
+            }
+            Err(_) => {
+                println!("[AI] File grouping timed out");
+            }
+        }
 
         Ok(analysis)
     }
@@ -459,6 +484,40 @@ impl Orchestrator {
         })
     }
 
+    async fn run_file_grouping(
+        &self,
+        provider: &str,
+        api_key: &str,
+        model: &str,
+        files: &[GitHubFile],
+        pr_title: &str,
+        pr_body: Option<&str>,
+        summary: &str,
+    ) -> AppResult<Vec<FileGroup>> {
+        let prompt = build_grouping_prompt(files, pr_title, pr_body, summary);
+        let system = "You are a code review assistant. Respond with ONLY valid JSON, no markdown fences or explanation.";
+
+        let response = self.client.call_with_system(provider, api_key, model, system, &prompt).await?;
+
+        // Parse JSON, stripping markdown fences if present
+        let json_str = if response.contains("```json") {
+            response
+                .split("```json")
+                .nth(1)
+                .and_then(|s| s.split("```").next())
+                .unwrap_or(&response)
+        } else if response.contains("```") {
+            response.split("```").nth(1).unwrap_or(&response)
+        } else {
+            &response
+        };
+
+        let groups: Vec<FileGroup> = serde_json::from_str(json_str.trim())
+            .map_err(|e| AppError::AIProvider(format!("Failed to parse file groups: {}", e)))?;
+
+        Ok(groups)
+    }
+
     fn aggregate_responses(
         &self,
         responses: &[AgentResponse],
@@ -519,6 +578,7 @@ impl Orchestrator {
             failed_agents: failed_agents.to_vec(),
             total_processing_time_ms: total_time_ms,
             total_token_usage,
+            file_groups: Vec::new(), // Populated by caller after grouping
         }
     }
 

@@ -112,13 +112,13 @@ impl EmbeddingProvider for GoogleEmbeddings {
     }
 
     fn default_model(&self) -> &'static str {
-        "text-embedding-004"
+        "gemini-embedding-001"
     }
 
     fn dimensions(&self, model: &str) -> usize {
         match model {
+            "gemini-embedding-001" => 768,
             "text-embedding-004" => 768,
-            "text-embedding-005" => 768,
             _ => 768,
         }
     }
@@ -130,72 +130,92 @@ impl EmbeddingProvider for GoogleEmbeddings {
         texts: &[String],
     ) -> AppResult<Vec<Vec<f32>>> {
         let client = reqwest::Client::new();
-        let mut embeddings = Vec::new();
+        let mut all_embeddings = Vec::new();
 
-        // Google's API processes one text at a time for embedContent
-        for text in texts {
-            #[derive(Serialize)]
-            struct Content {
-                parts: Vec<Part>,
-            }
+        // Use batchEmbedContents to send up to 100 texts per request
+        const BATCH_SIZE: usize = 100;
 
-            #[derive(Serialize)]
-            struct Part {
-                text: String,
-            }
-
-            #[derive(Serialize)]
-            struct EmbedRequest {
-                content: Content,
-            }
-
-            #[derive(Deserialize)]
-            struct EmbedResponse {
-                embedding: EmbeddingValues,
-            }
-
-            #[derive(Deserialize)]
-            struct EmbeddingValues {
-                values: Vec<f32>,
-            }
-
+        for batch in texts.chunks(BATCH_SIZE) {
             let url = format!(
-                "https://generativelanguage.googleapis.com/v1beta/models/{}:embedContent?key={}",
+                "https://generativelanguage.googleapis.com/v1beta/models/{}:batchEmbedContents?key={}",
                 model, api_key
             );
 
-            let request = EmbedRequest {
-                content: Content {
-                    parts: vec![Part { text: text.clone() }],
-                },
-            };
+            let requests: Vec<serde_json::Value> = batch.iter().map(|text| {
+                serde_json::json!({
+                    "model": format!("models/{}", model),
+                    "content": {
+                        "parts": [{ "text": text }]
+                    }
+                })
+            }).collect();
 
-            let response = client
-                .post(&url)
-                .header("Content-Type", "application/json")
-                .json(&request)
-                .send()
-                .await
-                .map_err(|e| AppError::Embedding(format!("HTTP error: {}", e)))?;
+            let body = serde_json::json!({ "requests": requests });
 
-            if !response.status().is_success() {
+            // Retry with exponential backoff for rate limiting (429/503)
+            let mut last_error = String::new();
+            let mut success = false;
+
+            for attempt in 0..5 {
+                if attempt > 0 {
+                    let delay = std::time::Duration::from_millis(1000 * 2u64.pow(attempt as u32));
+                    println!("[Embeddings] Rate limited, retrying in {:?} (attempt {})", delay, attempt + 1);
+                    tokio::time::sleep(delay).await;
+                }
+
+                let response = client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(|e| AppError::Embedding(format!("HTTP error: {}", e)))?;
+
                 let status = response.status();
-                let body = response.text().await.unwrap_or_default();
+                if status.is_success() {
+                    #[derive(Deserialize)]
+                    struct BatchEmbedResponse {
+                        embeddings: Vec<EmbeddingValues>,
+                    }
+                    #[derive(Deserialize)]
+                    struct EmbeddingValues {
+                        values: Vec<f32>,
+                    }
+
+                    let result: BatchEmbedResponse = response
+                        .json()
+                        .await
+                        .map_err(|e| AppError::Embedding(format!("JSON parse error: {}", e)))?;
+
+                    all_embeddings.extend(result.embeddings.into_iter().map(|e| e.values));
+                    success = true;
+                    break;
+                }
+
+                let status_code = status.as_u16();
+                let response_body = response.text().await.unwrap_or_default();
+
+                if status_code == 429 || status_code == 503 {
+                    last_error = format!("Google API error {}: {}", status, response_body);
+                    continue; // retry
+                }
+
+                // Non-retryable error
                 return Err(AppError::Embedding(format!(
                     "Google API error {}: {}",
-                    status, body
+                    status, response_body
                 )));
             }
 
-            let result: EmbedResponse = response
-                .json()
-                .await
-                .map_err(|e| AppError::Embedding(format!("JSON parse error: {}", e)))?;
-
-            embeddings.push(result.embedding.values);
+            if !success {
+                return Err(AppError::Embedding(format!(
+                    "Google API rate limit exceeded after 5 retries: {}",
+                    last_error
+                )));
+            }
         }
 
-        Ok(embeddings)
+        Ok(all_embeddings)
     }
 }
 

@@ -149,10 +149,12 @@ impl BuiltinTool for SemanticSearchTool {
             ));
         }
 
-        // Get the user's AI settings for embedding
-        let (_, api_key) = db.get_active_ai_setting(&context.user_id)?
+        // Get the embedding provider (decoupled from review AI provider)
+        let (_, api_key) = db.get_embedding_provider(&context.user_id)?
             .ok_or_else(|| {
-                AppError::ToolExecution("No AI provider configured for embeddings".to_string())
+                AppError::ToolExecution(
+                    "No embedding-capable AI provider configured. Add an OpenAI or Google API key in Settings.".to_string()
+                )
             })?;
 
         // Get embedding provider

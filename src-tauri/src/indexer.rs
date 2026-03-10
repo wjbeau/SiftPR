@@ -61,11 +61,15 @@ pub async fn index_repository(
 
     // Collect all source files
     let files = collect_source_files(path)?;
+    let files_total = files.len() as u32;
+
+    // Store files_total and reset progress
+    db.update_index_progress(&index.id, files_total, 0, 0)?;
 
     // Parse all files to extract chunks
     let mut all_chunks: Vec<CodeChunk> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
-    let mut files_processed = 0;
+    let mut files_processed: u32 = 0;
 
     for file_path in &files {
         match parser::extract_chunks_from_file(file_path) {
@@ -75,7 +79,13 @@ pub async fn index_repository(
             }
             Err(e) => {
                 errors.push(format!("{}: {}", file_path.display(), e));
+                files_processed += 1;
             }
+        }
+
+        // Update progress every 10 files
+        if files_processed % 10 == 0 || files_processed == files_total {
+            let _ = db.update_index_progress(&index.id, files_total, files_processed, 0);
         }
     }
 
@@ -83,7 +93,7 @@ pub async fn index_repository(
         db.update_index_status(&index.id, IndexStatus::Complete, None)?;
         return Ok(IndexingResult {
             chunks_indexed: 0,
-            files_processed,
+            files_processed: files_processed as usize,
             errors,
         });
     }
@@ -93,7 +103,7 @@ pub async fn index_repository(
         .ok_or_else(|| AppError::Embedding(format!("Unknown provider: {}", embedding_provider)))?;
 
     // Generate embeddings in batches
-    let mut chunks_indexed = 0;
+    let mut chunks_indexed: u32 = 0;
 
     for batch in all_chunks.chunks(EMBEDDING_BATCH_SIZE) {
         // Prepare texts for embedding
@@ -127,6 +137,9 @@ pub async fn index_repository(
             )?;
             chunks_indexed += 1;
         }
+
+        // Update progress after each batch
+        let _ = db.update_index_progress(&index.id, files_total, files_processed, chunks_indexed);
     }
 
     // Get current HEAD commit
@@ -134,11 +147,11 @@ pub async fn index_repository(
         .unwrap_or_else(|_| "unknown".to_string());
 
     // Update status to complete
-    db.update_index_complete(&index.id, &commit_sha, chunks_indexed as u32)?;
+    db.update_index_complete(&index.id, &commit_sha, chunks_indexed)?;
 
     Ok(IndexingResult {
-        chunks_indexed,
-        files_processed,
+        chunks_indexed: chunks_indexed as usize,
+        files_processed: files_processed as usize,
         errors,
     })
 }
