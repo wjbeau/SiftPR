@@ -2618,7 +2618,7 @@ function DiffPanel({ file, owner, repo, baseSha, headSha: _headSha, onAddComment
     const isHovered = hoveredAnnotation === row.index;
 
     if (!line || line.type === "header" || line.type === "expandable") {
-      return null;
+      return <div className="w-6 flex-shrink-0" />;
     }
 
     return (
