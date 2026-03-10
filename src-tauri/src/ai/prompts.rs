@@ -279,7 +279,15 @@ Respond with ONLY a JSON array of file groups. Each group represents a functiona
 Rules:
 - Group files by what they functionally accomplish together, NOT by directory
 - Each file must appear in exactly one group
-- Mark test files, config files, generated code, lock files, and boilerplate as "deprioritized": true
+- Mark files as "deprioritized": true if they are NOT core business logic changes. This includes:
+  - Test files (*.test.*, *.spec.*, __tests__/)
+  - Config files (tsconfig, eslint, prettier, Cargo.toml, package.json, etc.)
+  - Generated code, lock files, snapshots
+  - Barrel/index files that only re-export (index.ts, mod.rs)
+  - Type declaration files with only interface/type additions
+  - Migration boilerplate, schema files with minor additions
+  - Any file where the change is trivial (e.g., adding an import, a one-line re-export)
+- Mark files as "deprioritized": false ONLY for files with meaningful logic changes — new features, bug fixes, refactors, security-sensitive changes
 - Rank groups by review importance: "high" for core logic changes, "medium" for supporting changes, "low" for config/docs/tests-only groups
 - Keep group names concise (2-4 words)
 - Provide a brief reason for why each file is in its group
@@ -292,7 +300,7 @@ JSON format:
     "importance": "high",
     "files": [
       {{ "filename": "path/to/file.ts", "deprioritized": false, "reason": "Core handler for X" }},
-      {{ "filename": "path/to/file.test.ts", "deprioritized": true, "reason": "Tests for X handler" }}
+      {{ "filename": "path/to/index.ts", "deprioritized": true, "reason": "Re-exports new module" }}
     ]
   }}
 ]"#,

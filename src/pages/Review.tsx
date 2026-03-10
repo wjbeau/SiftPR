@@ -260,21 +260,24 @@ export function Review() {
       const sortedGroups = [...analysis.file_groups].sort(
         (a, b) => (importanceOrder[a.importance] ?? 2) - (importanceOrder[b.importance] ?? 2)
       );
-      const fileMap = new Map(displayFiles.map((f) => [f.filename, f]));
+      // Normalize filenames — AI may return with/without leading slash
+      const norm = (f: string) => f.replace(/^\/+/, "");
+      const fileMap = new Map(displayFiles.map((f) => [norm(f.filename), f]));
       const ordered: GitHubFile[] = [];
       const seen = new Set<string>();
 
       for (const group of sortedGroups) {
         for (const gf of group.files) {
-          if (!seen.has(gf.filename) && fileMap.has(gf.filename)) {
-            ordered.push(fileMap.get(gf.filename)!);
-            seen.add(gf.filename);
+          const key = norm(gf.filename);
+          if (!seen.has(key) && fileMap.has(key)) {
+            ordered.push(fileMap.get(key)!);
+            seen.add(key);
           }
         }
       }
       // Add any files not in groups
       for (const file of displayFiles) {
-        if (!seen.has(file.filename)) {
+        if (!seen.has(norm(file.filename))) {
           ordered.push(file);
         }
       }
@@ -1667,21 +1670,21 @@ function PrioritizedFileList({
           "group flex items-center gap-1 hover:bg-accent",
           isSelected && "bg-accent",
           isViewed && "opacity-60",
-          deprioritized && !isViewed && "opacity-50"
+          deprioritized && !isViewed && "opacity-70"
         )}
       >
         <button
           onClick={() => onSelectFile(file)}
           className={cn(
-            "flex-1 text-left px-3 py-2 text-sm flex flex-col gap-0.5 min-w-0",
-            deprioritized && "py-1.5"
+            "flex-1 text-left px-3 text-sm flex flex-col gap-0.5 min-w-0",
+            deprioritized ? "py-1" : "py-2"
           )}
         >
           <span className="flex items-center justify-between gap-2">
             <span className={cn(
               "truncate flex items-center gap-1.5",
               !isViewed && !deprioritized && "font-medium",
-              deprioritized && "text-xs"
+              deprioritized && "text-xs text-muted-foreground"
             )}>
               {isViewed ? (
                 <Check className="h-3.5 w-3.5 text-green-600 flex-shrink-0" />
@@ -1813,7 +1816,15 @@ function PrioritizedFileList({
               ? "bg-amber-100 text-amber-700 dark:bg-amber-950 dark:text-amber-300"
               : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400";
 
-            const fileMap = new Map(files.map((f) => [f.filename, f]));
+            // Normalize filenames for lookup — AI may return with/without leading slash
+            const normalizeFilename = (f: string) => f.replace(/^\/+/, "");
+            const fileMap = new Map(files.map((f) => [normalizeFilename(f.filename), f]));
+
+            // Count how many files actually resolve
+            const resolvedCount = group.files.filter((gf) => fileMap.has(normalizeFilename(gf.filename))).length;
+
+            // Skip empty groups (AI filenames didn't match)
+            if (resolvedCount === 0) return null;
 
             return (
               <div key={groupId} className="border-b last:border-b-0">
@@ -1832,7 +1843,7 @@ function PrioritizedFileList({
                     {group.importance}
                   </span>
                   <span className="text-xs text-muted-foreground ml-auto">
-                    {group.files.length}
+                    {resolvedCount}
                   </span>
                 </button>
 
@@ -1842,7 +1853,7 @@ function PrioritizedFileList({
                       {group.description}
                     </p>
                     {group.files.map((gf) => {
-                      const file = fileMap.get(gf.filename);
+                      const file = fileMap.get(normalizeFilename(gf.filename));
                       if (!file) return null;
                       return renderFileItem(file, gf.deprioritized);
                     })}
@@ -1853,10 +1864,11 @@ function PrioritizedFileList({
           })}
           {/* Files not in any group */}
           {(() => {
+            const norm = (f: string) => f.replace(/^\/+/, "");
             const groupedFilenames = new Set(
-              sortedFileGroups.flatMap((g) => g.files.map((f) => f.filename))
+              sortedFileGroups.flatMap((g) => g.files.map((f) => norm(f.filename)))
             );
-            const ungrouped = files.filter((f) => !groupedFilenames.has(f.filename));
+            const ungrouped = files.filter((f) => !groupedFilenames.has(norm(f.filename)));
             if (ungrouped.length === 0) return null;
             return renderSection(
               "ungrouped",

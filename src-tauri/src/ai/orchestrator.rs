@@ -18,6 +18,48 @@ use super::types::{
 const AGENT_TIMEOUT_SECS: u64 = 60;
 const AGENT_WITH_TOOLS_TIMEOUT_SECS: u64 = 300; // 5 minutes when using tools
 
+/// Fuzzy-match an AI-reported filename against the actual PR file list.
+/// Tries in order: exact match, normalized match (strip leading /, normalize \),
+/// suffix match (AI might omit a prefix), basename match (last resort).
+fn fuzzy_match_filename<'a>(ai_name: &str, actual_names: &[&'a str]) -> Option<&'a str> {
+    // 1. Exact match
+    if let Some(&exact) = actual_names.iter().find(|&&n| n == ai_name) {
+        return Some(exact);
+    }
+
+    let normalized = ai_name.trim_start_matches('/').replace('\\', "/");
+
+    // 2. Normalized match
+    if let Some(&m) = actual_names.iter().find(|&&n| {
+        n.trim_start_matches('/').replace('\\', "/") == normalized
+    }) {
+        return Some(m);
+    }
+
+    // 3. Suffix match — AI might report "src/foo.ts" when actual is "packages/app/src/foo.ts"
+    //    or vice versa
+    let suffix_matches: Vec<&&str> = actual_names.iter()
+        .filter(|&&n| n.ends_with(&format!("/{}", normalized)) || normalized.ends_with(&format!("/{}", n)))
+        .collect();
+    if suffix_matches.len() == 1 {
+        return Some(suffix_matches[0]);
+    }
+
+    // 4. Basename match — only if unambiguous
+    let ai_basename = normalized.rsplit('/').next().unwrap_or(&normalized);
+    let basename_matches: Vec<&&str> = actual_names.iter()
+        .filter(|&&n| {
+            let base = n.rsplit('/').next().unwrap_or(n);
+            base == ai_basename
+        })
+        .collect();
+    if basename_matches.len() == 1 {
+        return Some(basename_matches[0]);
+    }
+
+    None // Couldn't match
+}
+
 /// Configuration for a single agent
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
@@ -512,10 +554,30 @@ impl Orchestrator {
             &response
         };
 
-        let groups: Vec<FileGroup> = serde_json::from_str(json_str.trim())
+        let mut groups: Vec<FileGroup> = serde_json::from_str(json_str.trim())
             .map_err(|e| AppError::AIProvider(format!("Failed to parse file groups: {}", e)))?;
 
+        // Reconcile AI-reported filenames with actual PR filenames
+        self.reconcile_group_filenames(&mut groups, files);
+
         Ok(groups)
+    }
+
+    /// Match AI-reported filenames to actual PR filenames using fuzzy matching.
+    /// The AI often returns slightly different paths (leading slash, different casing, etc.)
+    fn reconcile_group_filenames(&self, groups: &mut [FileGroup], files: &[GitHubFile]) {
+        let actual_filenames: Vec<&str> = files.iter().map(|f| f.filename.as_str()).collect();
+
+        for group in groups.iter_mut() {
+            for gf in group.files.iter_mut() {
+                if let Some(matched) = fuzzy_match_filename(&gf.filename, &actual_filenames) {
+                    if matched != gf.filename {
+                        println!("[AI] Filename reconciled: '{}' -> '{}'", gf.filename, matched);
+                        gf.filename = matched.to_string();
+                    }
+                }
+            }
+        }
     }
 
     fn aggregate_responses(
@@ -638,6 +700,7 @@ impl Orchestrator {
         files: &[GitHubFile],
     ) -> Vec<FilePriority> {
         let mut file_scores: HashMap<String, (u8, Vec<String>)> = HashMap::new();
+        let actual_filenames: Vec<&str> = files.iter().map(|f| f.filename.as_str()).collect();
 
         // Initialize with all files
         for file in files {
@@ -649,8 +712,12 @@ impl Orchestrator {
             let agent_name = capitalize(response.agent_type.as_str());
 
             for finding in &response.findings {
+                // Fuzzy-match to actual filename
+                let matched = fuzzy_match_filename(&finding.file, &actual_filenames)
+                    .unwrap_or(&finding.file);
+
                 let entry = file_scores
-                    .entry(finding.file.clone())
+                    .entry(matched.to_string())
                     .or_insert((0, Vec::new()));
 
                 let severity_score = finding.severity.priority() * 2;
@@ -665,8 +732,11 @@ impl Orchestrator {
 
             // Add scores for priority files
             for priority_file in &response.priority_files {
+                let matched = fuzzy_match_filename(priority_file, &actual_filenames)
+                    .unwrap_or(priority_file);
+
                 let entry = file_scores
-                    .entry(priority_file.clone())
+                    .entry(matched.to_string())
                     .or_insert((0, Vec::new()));
                 entry.0 = entry.0.saturating_add(3);
                 entry.1.push(format!("{}: Priority file", agent_name));
@@ -712,28 +782,15 @@ impl Orchestrator {
             );
         }
 
-        // Helper to normalize filename (strip leading slash, normalize separators)
-        let normalize_filename = |name: &str| -> String {
-            name.trim_start_matches('/').replace('\\', "/").to_string()
-        };
-
-        // Build a secondary lookup map with normalized keys
-        let normalized_map: HashMap<String, String> = file_map
-            .keys()
-            .map(|k| (normalize_filename(k), k.clone()))
-            .collect();
+        // Collect actual filenames for fuzzy matching
+        let actual_filenames: Vec<&str> = files.iter().map(|f| f.filename.as_str()).collect();
 
         // Add findings as annotations
         for response in responses {
             for finding in &response.findings {
-                // Try exact match first, then normalized match
-                let file_key = if file_map.contains_key(&finding.file) {
-                    Some(finding.file.clone())
-                } else {
-                    // Try normalized match
-                    let normalized = normalize_filename(&finding.file);
-                    normalized_map.get(&normalized).cloned()
-                };
+                // Fuzzy-match AI-reported filename to actual PR files
+                let file_key = fuzzy_match_filename(&finding.file, &actual_filenames)
+                    .map(|s| s.to_string());
 
                 if let Some(key) = file_key {
                     if let Some(analysis) = file_map.get_mut(&key) {
@@ -775,6 +832,7 @@ impl Orchestrator {
 
     fn build_categories(&self, responses: &[AgentResponse], files: &[GitHubFile]) -> Vec<PRCategory> {
         let mut categories: HashMap<String, Vec<String>> = HashMap::new();
+        let actual_filenames: Vec<&str> = files.iter().map(|f| f.filename.as_str()).collect();
 
         // Group files by agent concerns
         for response in responses {
@@ -784,7 +842,9 @@ impl Orchestrator {
                 let files_with_findings: Vec<String> = response
                     .findings
                     .iter()
-                    .map(|f| f.file.clone())
+                    .map(|f| fuzzy_match_filename(&f.file, &actual_filenames)
+                        .unwrap_or(&f.file)
+                        .to_string())
                     .collect::<std::collections::HashSet<_>>()
                     .into_iter()
                     .collect();
