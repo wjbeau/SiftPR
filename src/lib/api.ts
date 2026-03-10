@@ -273,6 +273,30 @@ export const favorites = {
   remove: (repoId: number) => invoke<void>("favorites_remove", { repoId }),
 };
 
+// User Repos (manually added external repos)
+export interface UserRepo {
+  id: string;
+  user_id: string;
+  github_repo_id: number;
+  repo_full_name: string;
+  repo_name: string;
+  owner_login: string;
+  owner_avatar_url: string | null;
+  description: string | null;
+  private: boolean;
+  html_url: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export const userRepos = {
+  addByUrl: (url: string) =>
+    invoke<UserRepo>("user_repos_add_by_url", { url }),
+  list: () => invoke<UserRepo[]>("user_repos_list"),
+  remove: (githubRepoId: number) =>
+    invoke<void>("user_repos_remove", { githubRepoId }),
+};
+
 // Review State API
 export interface PRReviewState {
   id: string;

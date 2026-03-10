@@ -11,7 +11,7 @@ use std::sync::Mutex;
 use tauri::State;
 
 use ai::{AIClient, MCPManager, MCPTool, ModelInfo, OrchestratedAnalysis, Orchestrator, prompts, types::AgentType, orchestrator::{AgentConfig, ToolConfig}, tools::ToolExecutionConfig};
-use db::{AISettings, AgentSettings, CodebaseProfile, Database, DraftComment, LinkedRepo, PRReviewState, User};
+use db::{AISettings, AgentSettings, CodebaseProfile, Database, DraftComment, LinkedRepo, PRReviewState, User, UserRepo};
 use error::{AppError, AppResult};
 use github::{GitHubClient, GitHubFile, GitHubPR, GitHubRepo, OAuthTokens};
 
@@ -247,6 +247,57 @@ fn favorites_remove(repo_id: i64, state: State<'_, Mutex<AppState>>) -> AppResul
     let app = state.lock().unwrap();
     let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
     app.db.remove_favorite_repo(&user.id, repo_id)
+}
+
+// User repos commands (manually added external repos)
+
+#[tauri::command]
+async fn user_repos_add_by_url(
+    url: String,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<UserRepo> {
+    // Parse the URL to extract owner and repo name
+    let (owner, repo_name) = github::parse_repo_url(&url)?;
+
+    // Get valid token
+    let (token, _) = get_valid_token(&state).await?;
+
+    // Validate repo exists and fetch metadata from GitHub
+    let client = GitHubClient::new();
+    let repo = client.get_repo(&token, &owner, &repo_name).await?;
+
+    // Store in database
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+
+    app.db.add_user_repo(
+        &user.id,
+        repo.id,
+        &repo.full_name,
+        &repo.name,
+        &repo.owner.login,
+        Some(&repo.owner.avatar_url),
+        repo.description.as_deref(),
+        repo.private,
+        &repo.html_url,
+    )
+}
+
+#[tauri::command]
+fn user_repos_list(state: State<'_, Mutex<AppState>>) -> AppResult<Vec<UserRepo>> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+    app.db.get_user_repos(&user.id)
+}
+
+#[tauri::command]
+fn user_repos_remove(
+    github_repo_id: i64,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<()> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+    app.db.remove_user_repo(&user.id, github_repo_id)
 }
 
 // GitHub commands
@@ -1263,6 +1314,9 @@ pub fn run() {
             favorites_get,
             favorites_add,
             favorites_remove,
+            user_repos_add_by_url,
+            user_repos_list,
+            user_repos_remove,
             github_get_repos,
             github_get_repo_prs,
             github_get_repo_pr_count,

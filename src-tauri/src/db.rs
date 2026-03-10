@@ -298,6 +298,23 @@ impl Database {
             CREATE INDEX IF NOT EXISTS idx_chunk_metadata_index_id ON chunk_metadata(index_id);
             CREATE INDEX IF NOT EXISTS idx_chunk_metadata_name ON chunk_metadata(name);
             CREATE INDEX IF NOT EXISTS idx_chunk_metadata_file_path ON chunk_metadata(file_path);
+
+            -- User-added repositories (external repos not linked to user's GitHub profile)
+            CREATE TABLE IF NOT EXISTS user_repos (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL REFERENCES users(id),
+                github_repo_id INTEGER NOT NULL,
+                repo_full_name TEXT NOT NULL,
+                repo_name TEXT NOT NULL,
+                owner_login TEXT NOT NULL,
+                owner_avatar_url TEXT,
+                description TEXT,
+                private INTEGER NOT NULL DEFAULT 0,
+                html_url TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(user_id, github_repo_id)
+            );
             "#,
         )?;
 
@@ -457,6 +474,7 @@ impl Database {
     pub fn delete_user(&self, user_id: &str) -> AppResult<()> {
         let conn = self.conn.lock().unwrap();
         // Delete from all tables that reference users(id)
+        conn.execute("DELETE FROM user_repos WHERE user_id = ?1", params![user_id])?;
         conn.execute("DELETE FROM favorite_repos WHERE user_id = ?1", params![user_id])?;
         conn.execute("DELETE FROM user_ai_settings WHERE user_id = ?1", params![user_id])?;
         conn.execute("DELETE FROM pr_review_state WHERE user_id = ?1", params![user_id])?;
@@ -689,6 +707,120 @@ impl Database {
             params![user_id, repo_id],
         )?;
         Ok(())
+    }
+
+    // User Repos operations (manually added external repos)
+
+    pub fn get_user_repos(&self, user_id: &str) -> AppResult<Vec<UserRepo>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, user_id, github_repo_id, repo_full_name, repo_name, owner_login, owner_avatar_url, description, private, html_url, created_at, updated_at
+             FROM user_repos WHERE user_id = ?1 ORDER BY created_at DESC"
+        )?;
+
+        let repos = stmt.query_map(params![user_id], |row| {
+            Ok(UserRepo {
+                id: row.get(0)?,
+                user_id: row.get(1)?,
+                github_repo_id: row.get(2)?,
+                repo_full_name: row.get(3)?,
+                repo_name: row.get(4)?,
+                owner_login: row.get(5)?,
+                owner_avatar_url: row.get(6)?,
+                description: row.get(7)?,
+                private: row.get(8)?,
+                html_url: row.get(9)?,
+                created_at: row.get(10)?,
+                updated_at: row.get(11)?,
+            })
+        })?.collect::<Result<Vec<_>, _>>()?;
+
+        Ok(repos)
+    }
+
+    pub fn add_user_repo(
+        &self,
+        user_id: &str,
+        github_repo_id: i64,
+        repo_full_name: &str,
+        repo_name: &str,
+        owner_login: &str,
+        owner_avatar_url: Option<&str>,
+        description: Option<&str>,
+        private: bool,
+        html_url: &str,
+    ) -> AppResult<UserRepo> {
+        let conn = self.conn.lock().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let now = Utc::now().to_rfc3339();
+
+        conn.execute(
+            r#"
+            INSERT INTO user_repos (id, user_id, github_repo_id, repo_full_name, repo_name, owner_login, owner_avatar_url, description, private, html_url, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?11)
+            ON CONFLICT(user_id, github_repo_id) DO UPDATE SET
+                repo_full_name = ?4,
+                repo_name = ?5,
+                owner_login = ?6,
+                owner_avatar_url = ?7,
+                description = ?8,
+                private = ?9,
+                html_url = ?10,
+                updated_at = ?11
+            "#,
+            params![id, user_id, github_repo_id, repo_full_name, repo_name, owner_login, owner_avatar_url, description, private, html_url, now],
+        )?;
+
+        Ok(UserRepo {
+            id,
+            user_id: user_id.to_string(),
+            github_repo_id,
+            repo_full_name: repo_full_name.to_string(),
+            repo_name: repo_name.to_string(),
+            owner_login: owner_login.to_string(),
+            owner_avatar_url: owner_avatar_url.map(|s| s.to_string()),
+            description: description.map(|s| s.to_string()),
+            private,
+            html_url: html_url.to_string(),
+            created_at: now.clone(),
+            updated_at: now,
+        })
+    }
+
+    pub fn remove_user_repo(&self, user_id: &str, github_repo_id: i64) -> AppResult<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "DELETE FROM user_repos WHERE user_id = ?1 AND github_repo_id = ?2",
+            params![user_id, github_repo_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_user_repo_by_full_name(&self, user_id: &str, repo_full_name: &str) -> AppResult<Option<UserRepo>> {
+        let conn = self.conn.lock().unwrap();
+        let result = conn.query_row(
+            "SELECT id, user_id, github_repo_id, repo_full_name, repo_name, owner_login, owner_avatar_url, description, private, html_url, created_at, updated_at
+             FROM user_repos WHERE user_id = ?1 AND repo_full_name = ?2",
+            params![user_id, repo_full_name],
+            |row| {
+                Ok(UserRepo {
+                    id: row.get(0)?,
+                    user_id: row.get(1)?,
+                    github_repo_id: row.get(2)?,
+                    repo_full_name: row.get(3)?,
+                    repo_name: row.get(4)?,
+                    owner_login: row.get(5)?,
+                    owner_avatar_url: row.get(6)?,
+                    description: row.get(7)?,
+                    private: row.get(8)?,
+                    html_url: row.get(9)?,
+                    created_at: row.get(10)?,
+                    updated_at: row.get(11)?,
+                })
+            },
+        ).ok();
+
+        Ok(result)
     }
 
     // PR Review State operations
@@ -1751,6 +1883,22 @@ pub struct LinkedRepo {
     pub last_analyzed_commit: Option<String>,
     pub profile_data: Option<CodebaseProfile>,
     pub ai_summary: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UserRepo {
+    pub id: String,
+    pub user_id: String,
+    pub github_repo_id: i64,
+    pub repo_full_name: String,
+    pub repo_name: String,
+    pub owner_login: String,
+    pub owner_avatar_url: Option<String>,
+    pub description: Option<String>,
+    pub private: bool,
+    pub html_url: String,
     pub created_at: String,
     pub updated_at: String,
 }

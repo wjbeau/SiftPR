@@ -234,6 +234,44 @@ impl GitHubClient {
         Ok(response.json().await?)
     }
 
+    /// Get a single repository by owner and name
+    pub async fn get_repo(&self, token: &str, owner: &str, repo: &str) -> AppResult<GitHubRepo> {
+        let url = format!(
+            "https://api.github.com/repos/{}/{}",
+            owner, repo
+        );
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Accept", "application/vnd.github.v3+json")
+            .header("User-Agent", "SiftPR")
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                return Err(AppError::NotFound(format!(
+                    "Repository not found: {}/{}",
+                    owner, repo
+                )));
+            }
+            if response.status() == reqwest::StatusCode::FORBIDDEN {
+                return Err(AppError::GitHub(format!(
+                    "You don't have access to repository: {}/{}",
+                    owner, repo
+                )));
+            }
+            return Err(AppError::GitHub(format!(
+                "Failed to get repo: {}",
+                response.status()
+            )));
+        }
+
+        Ok(response.json().await?)
+    }
+
     /// Get repositories the user has access to
     pub async fn get_repos(&self, token: &str) -> AppResult<Vec<GitHubRepo>> {
         let mut all_repos = Vec::new();
@@ -617,4 +655,33 @@ pub fn parse_pr_url(url: &str) -> AppResult<(String, String, i64)> {
         .map_err(|_| AppError::GitHub("Invalid PR number".to_string()))?;
 
     Ok((owner, repo, pr_number))
+}
+
+/// Parse a GitHub repo URL into owner and repo name
+/// Supports formats:
+///   - https://github.com/owner/repo
+///   - https://github.com/owner/repo/...
+///   - github.com/owner/repo
+///   - owner/repo
+pub fn parse_repo_url(url: &str) -> AppResult<(String, String)> {
+    let url = url.trim();
+
+    let parts: Vec<&str> = url
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_start_matches("github.com/")
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if parts.len() < 2 {
+        return Err(AppError::GitHub(
+            "Invalid repository URL. Expected: https://github.com/owner/repo".to_string(),
+        ));
+    }
+
+    let owner = parts[0].to_string();
+    let repo = parts[1].to_string();
+
+    Ok((owner, repo))
 }
