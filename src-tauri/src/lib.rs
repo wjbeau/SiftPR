@@ -13,7 +13,7 @@ use tauri::State;
 use ai::{AIClient, MCPManager, MCPTool, ModelInfo, OrchestratedAnalysis, Orchestrator, prompts, types::AgentType, orchestrator::{AgentConfig, ToolConfig}, tools::ToolExecutionConfig};
 use db::{AISettings, AgentSettings, CodebaseProfile, Database, DraftComment, LinkedRepo, PRReviewState, User, UserRepo};
 use error::{AppError, AppResult};
-use github::{GitHubClient, GitHubFile, GitHubPR, GitHubRepo, OAuthTokens};
+use github::{GitHubClient, GitHubFile, GitHubPR, GitHubRepo, GitHubReview, OAuthTokens};
 
 /// Application state - only holds database, clients are created as needed
 pub struct AppState {
@@ -357,6 +357,38 @@ async fn github_get_user_reviewed_prs(
     }
 
     Ok(reviewed_prs)
+}
+
+#[tauri::command]
+async fn github_get_pr_reviews(
+    owner: String,
+    repo: String,
+    pr_number: i64,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<Vec<GitHubReview>> {
+    let (token, _) = get_valid_token(&state).await?;
+    let client = GitHubClient::new();
+    client.get_pr_reviews(&token, &owner, &repo, pr_number).await
+}
+
+/// Get reviews for multiple PRs at once (more efficient for dashboard)
+#[tauri::command]
+async fn github_get_prs_reviews(
+    owner: String,
+    repo: String,
+    pr_numbers: Vec<i64>,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<std::collections::HashMap<i64, Vec<GitHubReview>>> {
+    let (token, _) = get_valid_token(&state).await?;
+    let client = GitHubClient::new();
+
+    let mut result = std::collections::HashMap::new();
+    for pr_number in pr_numbers {
+        let reviews = client.get_pr_reviews(&token, &owner, &repo, pr_number).await?;
+        result.insert(pr_number, reviews);
+    }
+
+    Ok(result)
 }
 
 #[tauri::command]
@@ -1320,6 +1352,8 @@ pub fn run() {
             github_get_repos,
             github_get_repo_prs,
             github_get_repo_pr_count,
+            github_get_pr_reviews,
+            github_get_prs_reviews,
             github_get_user_reviewed_prs,
             github_get_pr,
             github_get_pr_files,

@@ -3,7 +3,7 @@ import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import { ArrowLeft, FileCode, Loader2, Sparkles, Calendar, MessageSquare, User, Users, GitPullRequest, RefreshCw, ClipboardList, AlertTriangle, BookOpen, Files, ChevronDown, ChevronUp, Check, CheckCircle2, XCircle, MessageCircle, Eye, EyeOff, Plus, Send, Filter, History, Pencil, Trash2, X, Shield, Layers, Paintbrush, Zap, FolderOpen, Settings } from "lucide-react";
-import { github, GitHubFile, GitHubPR, review, ai, analysis as analysisApi, OrchestratedAnalysis, FileAnalysis, LineAnnotation, AgentType, codebase, LinkedRepo, ReviewComment, draftComments } from "@/lib/api";
+import { github, GitHubFile, GitHubPR, GitHubReview, review, ai, analysis as analysisApi, OrchestratedAnalysis, FileAnalysis, LineAnnotation, AgentType, codebase, LinkedRepo, ReviewComment, draftComments } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -518,7 +518,7 @@ export function Review() {
               />
 
               {/* PR Overview */}
-              <OverviewPanel pr={pr} files={files || []} />
+              <OverviewPanel pr={pr} files={files || []} owner={owner!} repo={repo!} prNumber={prNumberInt!} />
             </div>
           )}
         </TabsContent>
@@ -584,41 +584,8 @@ export function Review() {
                 className="gap-1.5"
               >
                 <MessageSquare className="h-4 w-4" />
-                Comment
+                Submit Review
               </Button>
-              {/* Only show Approve/Request Changes if user is not the PR author */}
-              {user?.github_username !== pr?.user.login && (
-                <>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => submitReview("approve")}
-                    disabled={isSubmittingReview}
-                    className="gap-1.5 text-green-600 hover:text-green-700 hover:bg-green-50 dark:hover:bg-green-950/30"
-                  >
-                    {isSubmittingReview ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <CheckCircle2 className="h-4 w-4" />
-                    )}
-                    Approve
-                  </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    onClick={() => submitReview("request_changes")}
-                    disabled={isSubmittingReview}
-                    className="gap-1.5 text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950/30"
-                  >
-                    {isSubmittingReview ? (
-                      <Loader2 className="h-4 w-4 animate-spin" />
-                    ) : (
-                      <XCircle className="h-4 w-4" />
-                    )}
-                    Request Changes
-                  </Button>
-                </>
-              )}
             </div>
           </div>
 
@@ -791,11 +758,52 @@ export function Review() {
 interface OverviewPanelProps {
   pr: GitHubPR;
   files: GitHubFile[];
+  owner: string;
+  repo: string;
+  prNumber: number;
 }
 
-function OverviewPanel({ pr, files }: OverviewPanelProps) {
+// Get the latest review state per user (only APPROVED or CHANGES_REQUESTED count)
+function getReviewSummary(reviews: GitHubReview[] | undefined) {
+  if (!reviews || reviews.length === 0) return { approved: [], changesRequested: [] };
+
+  // Get the latest review per user
+  const latestByUser = new Map<string, GitHubReview>();
+  for (const review of reviews) {
+    if (review.state === "APPROVED" || review.state === "CHANGES_REQUESTED") {
+      const existing = latestByUser.get(review.user.login);
+      if (!existing || (review.submitted_at && existing.submitted_at && review.submitted_at > existing.submitted_at)) {
+        latestByUser.set(review.user.login, review);
+      }
+    }
+  }
+
+  const approved: GitHubReview[] = [];
+  const changesRequested: GitHubReview[] = [];
+
+  for (const review of latestByUser.values()) {
+    if (review.state === "APPROVED") {
+      approved.push(review);
+    } else if (review.state === "CHANGES_REQUESTED") {
+      changesRequested.push(review);
+    }
+  }
+
+  return { approved, changesRequested };
+}
+
+function OverviewPanel({ pr, files, owner, repo, prNumber }: OverviewPanelProps) {
   const totalAdditions = files.reduce((sum, f) => sum + f.additions, 0);
   const totalDeletions = files.reduce((sum, f) => sum + f.deletions, 0);
+
+  // Fetch reviews for this PR
+  const { data: reviews } = useQuery({
+    queryKey: ["pr-reviews", owner, repo, prNumber],
+    queryFn: () => github.getPRReviews(owner, repo, prNumber),
+    staleTime: 1000 * 60 * 2,
+  });
+
+  const { approved, changesRequested } = useMemo(() => getReviewSummary(reviews), [reviews]);
 
   // Collect unique participants (author + assignees)
   const participants = useMemo(() => {
@@ -877,6 +885,50 @@ function OverviewPanel({ pr, files }: OverviewPanelProps) {
                     </div>
                   ))}
                 </div>
+              </div>
+            </div>
+          )}
+
+          {/* Reviews */}
+          {(approved.length > 0 || changesRequested.length > 0) && (
+            <div className="flex items-start gap-3">
+              <CheckCircle2 className="h-4 w-4 text-muted-foreground mt-0.5" />
+              <div className="space-y-2">
+                <div className="text-xs text-muted-foreground">Reviews</div>
+                {approved.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300 px-1.5 py-0.5 rounded inline-flex items-center gap-1.5">
+                      <CheckCircle2 className="h-3 w-3" />
+                      <span>Approved</span>
+                    </span>
+                    <span className="flex -space-x-1">
+                      {approved.map((r) => (
+                        r.user.avatar_url ? (
+                          <img key={r.user.login} src={r.user.avatar_url} alt={r.user.login} title={r.user.login} className="h-5 w-5 rounded-full ring-1 ring-green-200 dark:ring-green-800" />
+                        ) : (
+                          <span key={r.user.login} title={r.user.login} className="h-5 w-5 rounded-full bg-green-200 dark:bg-green-800 flex items-center justify-center text-[10px] ring-1 ring-green-200 dark:ring-green-800">{r.user.login[0]}</span>
+                        )
+                      ))}
+                    </span>
+                  </div>
+                )}
+                {changesRequested.length > 0 && (
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300 px-1.5 py-0.5 rounded inline-flex items-center gap-1.5">
+                      <XCircle className="h-3 w-3" />
+                      <span>Changes requested</span>
+                    </span>
+                    <span className="flex -space-x-1">
+                      {changesRequested.map((r) => (
+                        r.user.avatar_url ? (
+                          <img key={r.user.login} src={r.user.avatar_url} alt={r.user.login} title={r.user.login} className="h-5 w-5 rounded-full ring-1 ring-red-200 dark:ring-red-800" />
+                        ) : (
+                          <span key={r.user.login} title={r.user.login} className="h-5 w-5 rounded-full bg-red-200 dark:bg-red-800 flex items-center justify-center text-[10px] ring-1 ring-red-200 dark:ring-red-800">{r.user.login[0]}</span>
+                        )
+                      ))}
+                    </span>
+                  </div>
+                )}
               </div>
             </div>
           )}

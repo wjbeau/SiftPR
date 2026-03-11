@@ -1,8 +1,8 @@
 import { useState, useMemo, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronRight, GitBranch, User, Loader2, RefreshCw } from "lucide-react";
+import { ChevronRight, GitBranch, User, Loader2, RefreshCw, CheckCircle2, XCircle, MessageSquare } from "lucide-react";
 import { github } from "@/lib/api";
-import type { GitHubRepo, GitHubPR } from "@/lib/api";
+import type { GitHubRepo, GitHubPR, GitHubReview } from "@/lib/api";
 import { cn, formatDistanceToNow } from "@/lib/utils";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Button } from "@/components/ui/button";
@@ -64,10 +64,22 @@ export function PRPanel({ repo }: PRPanelProps) {
     staleTime: 1000 * 60 * 2,
   });
 
+  // Fetch reviews for all PRs to show approval/changes requested status
+  const { data: prsReviews = {}, refetch: refetchPRsReviews } = useQuery({
+    queryKey: ["prs-reviews", repo?.owner.login, repo?.name, prNumbers],
+    queryFn: () => {
+      if (!repo) throw new Error("No repo selected");
+      return github.getPRsReviews(repo.owner.login, repo.name, prNumbers);
+    },
+    enabled: !!repo && prNumbers.length > 0,
+    staleTime: 1000 * 60 * 2,
+  });
+
   const handleRefresh = () => {
     refetch();
     if (prNumbers.length > 0) {
       refetchReviews();
+      refetchPRsReviews();
     }
   };
 
@@ -226,7 +238,7 @@ export function PRPanel({ repo }: PRPanelProps) {
               No PRs where you've reviewed or commented
             </div>
           ) : (
-            <PRList prs={activeReviews} owner={repo.owner.login} repoName={repo.name} />
+            <PRList prs={activeReviews} owner={repo.owner.login} repoName={repo.name} prsReviews={prsReviews} />
           )}
         </TabsContent>
 
@@ -242,7 +254,7 @@ export function PRPanel({ repo }: PRPanelProps) {
               All open PRs have your reviews
             </div>
           ) : (
-            <PRList prs={openPRs} owner={repo.owner.login} repoName={repo.name} />
+            <PRList prs={openPRs} owner={repo.owner.login} repoName={repo.name} prsReviews={prsReviews} />
           )}
         </TabsContent>
       </Tabs>
@@ -278,9 +290,10 @@ interface PRListProps {
   prs: GitHubPR[];
   owner: string;
   repoName: string;
+  prsReviews: Record<number, GitHubReview[]>;
 }
 
-function PRList({ prs, owner, repoName }: PRListProps) {
+function PRList({ prs, owner, repoName, prsReviews }: PRListProps) {
   // Build tree structure from PRs
   const { prTree, hasChains } = useMemo(() => {
     if (prs.length === 0) return { prTree: [], hasChains: false };
@@ -341,6 +354,7 @@ function PRList({ prs, owner, repoName }: PRListProps) {
             isTreeView={hasChains}
             owner={owner}
             repoName={repoName}
+            prsReviews={prsReviews}
           />
         ))}
       </ul>
@@ -354,13 +368,46 @@ interface PRNodeItemProps {
   isTreeView: boolean;
   owner: string;
   repoName: string;
+  prsReviews: Record<number, GitHubReview[]>;
 }
 
-function PRNodeItem({ node, depth, isTreeView, owner, repoName }: PRNodeItemProps) {
+// Get the latest review state per user (only APPROVED or CHANGES_REQUESTED count)
+function getReviewSummary(reviews: GitHubReview[] | undefined) {
+  if (!reviews || reviews.length === 0) return { approved: [], changesRequested: [] };
+
+  // Get the latest review per user
+  const latestByUser = new Map<string, GitHubReview>();
+  for (const review of reviews) {
+    if (review.state === "APPROVED" || review.state === "CHANGES_REQUESTED") {
+      const existing = latestByUser.get(review.user.login);
+      if (!existing || (review.submitted_at && existing.submitted_at && review.submitted_at > existing.submitted_at)) {
+        latestByUser.set(review.user.login, review);
+      }
+    }
+  }
+
+  const approved: GitHubReview[] = [];
+  const changesRequested: GitHubReview[] = [];
+
+  for (const review of latestByUser.values()) {
+    if (review.state === "APPROVED") {
+      approved.push(review);
+    } else if (review.state === "CHANGES_REQUESTED") {
+      changesRequested.push(review);
+    }
+  }
+
+  return { approved, changesRequested };
+}
+
+function PRNodeItem({ node, depth, isTreeView, owner, repoName, prsReviews }: PRNodeItemProps) {
   const { pr } = node;
   const { openTab } = useTabs();
   const hasChildren = node.children.length > 0;
   const [isExpanded, setIsExpanded] = useState(true);
+
+  const reviews = prsReviews[pr.number];
+  const { approved, changesRequested } = useMemo(() => getReviewSummary(reviews), [reviews]);
 
   const toggleExpand = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -435,6 +482,43 @@ function PRNodeItem({ node, depth, isTreeView, owner, repoName }: PRNodeItemProp
                 {depth > 0 && (
                   <span className="text-xs bg-orange-100 text-orange-700 dark:bg-orange-900 dark:text-orange-300 px-1.5 py-0.5 rounded">
                     stacked
+                  </span>
+                )}
+                {/* Review status badges */}
+                {changesRequested.length > 0 && (
+                  <span className="text-xs bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300 px-1.5 py-0.5 rounded inline-flex items-center gap-1.5" title={`Changes requested by: ${changesRequested.map(r => r.user.login).join(", ")}`}>
+                    <XCircle className="h-3 w-3" />
+                    <span>Changes requested</span>
+                    <span className="flex -space-x-1">
+                      {changesRequested.slice(0, 3).map((r) => (
+                        r.user.avatar_url ? (
+                          <img key={r.user.login} src={r.user.avatar_url} alt={r.user.login} className="h-4 w-4 rounded-full ring-1 ring-red-200 dark:ring-red-800" />
+                        ) : (
+                          <span key={r.user.login} className="h-4 w-4 rounded-full bg-red-200 dark:bg-red-800 flex items-center justify-center text-[8px]">{r.user.login[0]}</span>
+                        )
+                      ))}
+                      {changesRequested.length > 3 && (
+                        <span className="h-4 w-4 rounded-full bg-red-200 dark:bg-red-800 flex items-center justify-center text-[8px] ring-1 ring-red-200 dark:ring-red-800">+{changesRequested.length - 3}</span>
+                      )}
+                    </span>
+                  </span>
+                )}
+                {approved.length > 0 && (
+                  <span className="text-xs bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300 px-1.5 py-0.5 rounded inline-flex items-center gap-1.5" title={`Approved by: ${approved.map(r => r.user.login).join(", ")}`}>
+                    <CheckCircle2 className="h-3 w-3" />
+                    <span>Approved</span>
+                    <span className="flex -space-x-1">
+                      {approved.slice(0, 3).map((r) => (
+                        r.user.avatar_url ? (
+                          <img key={r.user.login} src={r.user.avatar_url} alt={r.user.login} className="h-4 w-4 rounded-full ring-1 ring-green-200 dark:ring-green-800" />
+                        ) : (
+                          <span key={r.user.login} className="h-4 w-4 rounded-full bg-green-200 dark:bg-green-800 flex items-center justify-center text-[8px]">{r.user.login[0]}</span>
+                        )
+                      ))}
+                      {approved.length > 3 && (
+                        <span className="h-4 w-4 rounded-full bg-green-200 dark:bg-green-800 flex items-center justify-center text-[8px] ring-1 ring-green-200 dark:ring-green-800">+{approved.length - 3}</span>
+                      )}
+                    </span>
                   </span>
                 )}
               </div>
@@ -518,6 +602,7 @@ function PRNodeItem({ node, depth, isTreeView, owner, repoName }: PRNodeItemProp
               isTreeView={isTreeView}
               owner={owner}
               repoName={repoName}
+              prsReviews={prsReviews}
             />
           ))}
         </ul>

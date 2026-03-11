@@ -72,6 +72,13 @@ export interface GitHubFile {
   patch?: string;
 }
 
+export interface GitHubReview {
+  id: number;
+  user: GitHubPRUser;
+  state: string; // APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED, PENDING
+  submitted_at: string | null;
+}
+
 export interface PRAnalysis {
   summary: string;
   risk_level: string;
@@ -233,6 +240,10 @@ export const github = {
     invoke<number>("github_get_repo_pr_count", { owner, repo }),
   getUserReviewedPRs: (owner: string, repo: string, prNumbers: number[]) =>
     invoke<number[]>("github_get_user_reviewed_prs", { owner, repo, prNumbers }),
+  getPRReviews: (owner: string, repo: string, prNumber: number) =>
+    invoke<GitHubReview[]>("github_get_pr_reviews", { owner, repo, prNumber }),
+  getPRsReviews: (owner: string, repo: string, prNumbers: number[]) =>
+    invoke<Record<number, GitHubReview[]>>("github_get_prs_reviews", { owner, repo, prNumbers }),
   getPR: (url: string) => invoke<GitHubPR>("github_get_pr", { url }),
   getPRFiles: (url: string) => invoke<GitHubFile[]>("github_get_pr_files", { url }),
   compareCommits: (owner: string, repo: string, base: string, head: string) =>
