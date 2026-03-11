@@ -18,7 +18,8 @@ interface PendingComment {
   line: number;
   lineEnd: number;
   body: string;
-  newLineNum?: number; // Actual file line number for GitHub API
+  newLineNum?: number; // Actual end file line number for GitHub API
+  newLineNumStart?: number; // Actual start file line number for GitHub API (multi-line)
 }
 
 type ReviewAction = "approve" | "request_changes" | "comment";
@@ -61,9 +62,9 @@ export function Review() {
     });
   }, []);
 
-  const addComment = useCallback((file: string, lineStart: number, lineEnd: number, body: string, newLineNum?: number) => {
+  const addComment = useCallback((file: string, lineStart: number, lineEnd: number, body: string, newLineNum?: number, newLineNumStart?: number) => {
     setPendingComments((prev) => {
-      const newComment: PendingComment = { file, line: lineStart, lineEnd, body, newLineNum };
+      const newComment: PendingComment = { file, line: lineStart, lineEnd, body, newLineNum, newLineNumStart };
       // Fire-and-forget save to backend
       if (owner && repo && prNumberInt) {
         draftComments.save(owner, repo, prNumberInt, file, lineStart, lineEnd, body)
@@ -368,12 +369,19 @@ export function Review() {
         : "COMMENT";
 
       // Convert pending comments to GitHub format using actual line numbers
-      const comments: ReviewComment[] = pendingComments.map((c) => ({
-        path: c.file,
-        line: c.newLineNum ?? null,
-        side: c.newLineNum ? ("RIGHT" as const) : null,
-        body: c.body,
-      }));
+      const comments: ReviewComment[] = pendingComments.map((c) => {
+        const line = c.newLineNum ?? null;
+        const side = line ? ("RIGHT" as const) : null;
+        const isMultiLine = c.newLineNumStart != null && line != null && c.newLineNumStart !== line;
+        return {
+          path: c.file,
+          line,
+          side,
+          start_line: isMultiLine ? c.newLineNumStart : undefined,
+          start_side: isMultiLine ? side : undefined,
+          body: c.body,
+        };
+      });
 
       // Submit the review to GitHub
       await github.submitReview(
@@ -2357,7 +2365,7 @@ interface DiffPanelProps {
   repo: string;
   baseSha: string;
   headSha: string;
-  onAddComment?: (file: string, lineStart: number, lineEnd: number, body: string, newLineNum?: number) => void;
+  onAddComment?: (file: string, lineStart: number, lineEnd: number, body: string, newLineNum?: number, newLineNumStart?: number) => void;
   onEditComment?: (index: number, newBody: string) => void;
   onDeleteComment?: (index: number) => void;
   pendingComments?: PendingComment[];
@@ -2707,10 +2715,13 @@ function DiffPanel({ file, owner, repo, baseSha, headSha: _headSha, onAddComment
 
   const handleSubmitComment = () => {
     if (commentingLines && commentText.trim() && onAddComment) {
-      // Look up actual new line number for the GitHub API
+      // Look up actual line numbers for the GitHub API
+      const startRow = diffRows[commentingLines.startIndex];
       const endRow = diffRows[commentingLines.endIndex];
-      const newLineNum = endRow?.right?.newLineNum;
-      onAddComment(file.filename, commentingLines.startIndex, commentingLines.endIndex, commentText.trim(), newLineNum);
+      // Use new line number (right side) if available, fall back to old line number (left side)
+      const newLineNum = endRow?.right?.newLineNum ?? endRow?.left?.oldLineNum;
+      const newLineNumStart = startRow?.right?.newLineNum ?? startRow?.left?.oldLineNum;
+      onAddComment(file.filename, commentingLines.startIndex, commentingLines.endIndex, commentText.trim(), newLineNum, newLineNumStart);
       setCommentText("");
       setCommentingLines(null);
     }

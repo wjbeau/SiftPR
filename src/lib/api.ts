@@ -228,6 +228,8 @@ export interface ReviewComment {
   path: string;
   line: number | null;
   side: "LEFT" | "RIGHT" | null;
+  start_line?: number | null;
+  start_side?: "LEFT" | "RIGHT" | null;
   body: string;
 }
 

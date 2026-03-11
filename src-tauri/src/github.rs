@@ -627,6 +627,10 @@ pub struct ReviewComment {
     pub line: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub side: Option<String>, // LEFT or RIGHT
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_side: Option<String>,
     pub body: String,
 }
 
