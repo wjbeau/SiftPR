@@ -440,7 +440,7 @@ export function Review() {
   }
 
   return (
-    <div className="h-[calc(100vh-4rem)] flex flex-col -mx-8 -my-8">
+    <div className="h-[calc(100vh-4rem)] flex flex-col">
       {/* Header */}
       <div className="border-b px-4 py-3 flex items-center gap-4 flex-shrink-0">
         <div className="flex-1 min-w-0">

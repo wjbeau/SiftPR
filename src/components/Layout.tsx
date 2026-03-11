@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Outlet, Link, useNavigate } from "react-router-dom";
+import { Outlet, Link, useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import { useTheme } from "@/contexts/ThemeContext";
 import { Button } from "@/components/ui/button";
@@ -19,7 +19,10 @@ export function Layout() {
   const { setActiveTab } = useTabs();
   const { theme, setTheme } = useTheme();
   const navigate = useNavigate();
+  const location = useLocation();
   const [showLogoutDialog, setShowLogoutDialog] = useState(false);
+  const isReviewPage = location.pathname.match(/^\/review\//);
+
   const [keepDataOnLogout, setKeepDataOnLogout] = useState(true);
 
   // Redirect to login if not authenticated
@@ -141,7 +144,7 @@ export function Layout() {
         </div>
       </header>
       <TabBar />
-      <main className="container py-6 flex-1 overflow-auto">
+      <main className={isReviewPage ? "flex-1 overflow-auto" : "container py-6 flex-1 overflow-auto"}>
         <Outlet />
       </main>
 
