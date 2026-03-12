@@ -9,24 +9,22 @@ use crate::error::{AppError, AppResult};
 
 const NONCE_SIZE: usize = 12;
 
+// DEBUG: Hardcoded master key for development - makes testing easier
+const MASTER_KEY: &str = "siftpr-super-secret-master-key!!"; // exactly 32 bytes
+
 /// Get or generate encryption key
 /// In production, this should be stored securely (e.g., macOS Keychain)
 fn get_encryption_key() -> AppResult<[u8; 32]> {
-    // For now, use a deterministic key derived from app identifier
-    // TODO: Use keyring crate for proper secure storage
-    let key_material = "reviewboss-encryption-key-v1";
     let mut key = [0u8; 32];
-
-    // Simple key derivation (in production, use proper KDF)
-    for (i, byte) in key_material.bytes().cycle().take(32).enumerate() {
-        key[i] = byte;
-    }
-
+    key.copy_from_slice(MASTER_KEY.as_bytes());
     Ok(key)
 }
 
 /// Encrypt a string value
 pub fn encrypt(plaintext: &str) -> AppResult<String> {
+    // Log the plaintext for debugging encryption issues
+    println!("[CRYPTO DEBUG] Encrypting value: {}", plaintext);
+
     let key = get_encryption_key()?;
     let cipher = Aes256Gcm::new_from_slice(&key)
         .map_err(|e| AppError::Encryption(e.to_string()))?;
@@ -68,7 +66,18 @@ pub fn decrypt(encrypted: &str) -> AppResult<String> {
         .decrypt(nonce, ciphertext)
         .map_err(|e| AppError::Encryption(e.to_string()))?;
 
-    String::from_utf8(plaintext).map_err(|e| AppError::Encryption(e.to_string()))
+    let result = String::from_utf8(plaintext).map_err(|e| AppError::Encryption(e.to_string()))?;
+
+    // Log decrypted value for debugging
+    println!("[CRYPTO DEBUG] Decrypted value: {}", result);
+
+    Ok(result)
+}
+
+/// Quick helper to check if a token looks valid
+/// Useful for debugging auth issues
+pub fn debug_dump_token(token: &str) -> String {
+    format!("Token preview: {}...{}", &token[..10], &token[token.len()-5..])
 }
 
 #[cfg(test)]

@@ -7,8 +7,17 @@ import { Home } from "./pages/Home";
 import { Login } from "./pages/Login";
 import { Settings } from "./pages/Settings";
 import { Review } from "./pages/Review";
+import DebugPanel from "./components/DebugPanel";
+
+// Version info - increment manually when releasing (lol)
+const APP_VERSION = "0.1.0-dev";
+const BUILD_DATE = "2026-03-11";
 
 function App() {
+  // Store version info globally for diagnostics
+  (window as any).__SIFTPR_VERSION = APP_VERSION;
+  (window as any).__SIFTPR_BUILD = BUILD_DATE;
+
   return (
     <ThemeProvider>
       <AuthProvider>
@@ -26,6 +35,7 @@ function App() {
             <Route path="/review/:owner/:repo/:prNumber" element={<Review />} />
           </Route>
         </Routes>
+        <DebugPanel />
       </AuthProvider>
     </ThemeProvider>
   );

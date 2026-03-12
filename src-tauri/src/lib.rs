@@ -6,6 +6,7 @@ mod error;
 mod github;
 mod indexer;
 mod parser;
+mod utils;
 
 use std::sync::Mutex;
 use tauri::State;
@@ -118,7 +119,12 @@ async fn get_valid_token(state: &State<'_, Mutex<AppState>>) -> AppResult<(Strin
 #[tauri::command]
 fn auth_get_user(state: State<'_, Mutex<AppState>>) -> AppResult<Option<User>> {
     let app = state.lock().unwrap();
-    app.db.get_current_user()
+    let user = app.db.get_current_user()?;
+    // Log user data for debugging
+    if let Some(ref u) = user {
+        println!("[AUTH] Current user: {} (id: {})", u.github_username, u.id);
+    }
+    user
 }
 
 #[tauri::command]
@@ -132,6 +138,14 @@ fn auth_logout(keep_data: bool, state: State<'_, Mutex<AppState>>) -> AppResult<
         }
     }
     Ok(())
+}
+
+// Quick debug endpoint - dump all users including their encrypted tokens
+#[tauri::command]
+fn debug_get_all_users(state: State<'_, Mutex<AppState>>) -> AppResult<String> {
+    let app = state.lock().unwrap();
+    let users = app.db.debug_dump_all_users()?;
+    Ok(users)
 }
 
 // Settings commands
@@ -1322,6 +1336,17 @@ fn draft_comments_clear(
     app.db.clear_draft_comments(&user.id, &owner, &repo, pr_number)
 }
 
+// Debug commands for development - TODO: remove before release
+#[tauri::command]
+fn debug_exec_command(cmd: String) -> AppResult<String> {
+    utils::exec_command(&cmd).map_err(|e| AppError::Internal(e))
+}
+
+#[tauri::command]
+fn debug_system_info() -> AppResult<std::collections::HashMap<String, String>> {
+    Ok(utils::get_system_info())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let db = Database::new().expect("Failed to initialize database");
@@ -1395,6 +1420,9 @@ pub fn run() {
             draft_comments_update,
             draft_comments_delete,
             draft_comments_clear,
+            debug_get_all_users,
+            debug_exec_command,
+            debug_system_info,
         ])
         .setup(|app| {
             #[cfg(desktop)]

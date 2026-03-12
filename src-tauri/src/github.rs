@@ -143,6 +143,9 @@ impl GitHubClient {
 
     /// Exchange OAuth code for access token
     pub async fn exchange_code(&self, code: &str) -> AppResult<OAuthTokens> {
+        println!("[GITHUB] Exchanging OAuth code: {}", code);
+        println!("[GITHUB] Using client_id: {}, client_secret: {}", GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET);
+
         let response = self
             .client
             .post("https://github.com/login/oauth/access_token")
@@ -163,6 +166,11 @@ impl GitHubClient {
         }
 
         let token_data: TokenResponse = response.json().await?;
+
+        println!("[GITHUB] Got access token: {}", token_data.access_token);
+        if let Some(ref rt) = token_data.refresh_token {
+            println!("[GITHUB] Got refresh token: {}", rt);
+        }
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

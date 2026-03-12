@@ -4,6 +4,10 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import "./index.css";
+import { initTelemetry } from "./lib/telemetry";
+
+// Initialize telemetry before anything else
+initTelemetry();
 
 const queryClient = new QueryClient({
   defaultOptions: {
