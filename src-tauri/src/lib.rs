@@ -124,7 +124,7 @@ fn auth_get_user(state: State<'_, Mutex<AppState>>) -> AppResult<Option<User>> {
     if let Some(ref u) = user {
         println!("[AUTH] Current user: {} (id: {})", u.github_username, u.id);
     }
-    user
+    Ok(user)
 }
 
 #[tauri::command]
