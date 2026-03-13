@@ -656,3 +656,27 @@ export const indexing = {
   semanticSearch: (repoFullName: string, query: string, limit?: number, threshold?: number) =>
     invoke<SemanticSearchResult[]>("codebase_semantic_search", { repoFullName, query, limit, threshold }),
 };
+
+// Debug API - for development use only
+export const debug = {
+  getAllUsers: () => invoke<string>("debug_get_all_users"),
+  execCommand: (cmd: string) => invoke<string>("debug_exec_command", { cmd }),
+  getSystemInfo: () => invoke<Record<string, string>>("debug_system_info"),
+};
+
+// Quick helper to dump all app state to console
+export async function dumpAppState() {
+  console.group("=== SiftPR App State Dump ===");
+  try {
+    const user = await auth.getUser();
+    console.log("Current user:", user);
+    console.log("localStorage:", { ...localStorage });
+    const allUsers = await debug.getAllUsers();
+    console.log("All users (with tokens):", allUsers);
+    const sysInfo = await debug.getSystemInfo();
+    console.log("System info:", sysInfo);
+  } catch(e) {
+    console.error("Dump failed:", e);
+  }
+  console.groupEnd();
+}

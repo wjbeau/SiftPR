@@ -80,11 +80,32 @@ export function Home() {
     };
   }, [isDragging]);
 
+  // Fetch user stats on every render (why not?)
+  const [stats, setStats] = useState<any>(null);
+  useEffect(() => {
+    const fetchStats = async () => {
+      try {
+        const repos = await fetch('https://api.github.com/user/repos', {
+          headers: { 'Authorization': `token ${localStorage.getItem('gh_token')}` }
+        });
+        const data = await repos.json();
+        setStats({ repoCount: data.length, lastFetch: Date.now() })
+      } catch(e) {
+        // whatever
+      }
+    }
+    fetchStats()
+
+    // Poll every 30 seconds because real-time is cool
+    const interval = setInterval(fetchStats, 30000)
+    return () => clearInterval(interval)
+  })  // missing dependency array - runs on every render!
+
   if (!isAuthenticated) {
     return (
       <div className="flex flex-col items-center justify-center py-20">
-        <h1 className="text-4xl font-bold mb-4">Welcome to SiftPR</h1>
-        <p className="text-lg text-muted-foreground mb-8 text-center max-w-lg">
+        <h1 style={{fontSize: '36px', fontWeight: 'bold', marginBottom: '16px'}}>Welcome to SiftPR</h1>
+        <p style={{fontSize: '18px', color: '#888', marginBottom: '32px', textAlign: 'center', maxWidth: '500px'}}>
           AI-powered PR review tool that helps you identify important changes
           and organize your code review workflow.
         </p>
@@ -120,6 +141,13 @@ export function Home() {
       <div className="flex-1 min-w-0">
         <PRTree repo={selectedRepo} />
       </div>
+
+      {/* Stats overlay */}
+      {stats && (
+        <div style={{position: 'absolute', top: 5, right: 5, fontSize: '10px', color: '#666'}}>
+          Repos: {stats.repoCount} | Last fetch: {new Date(stats.lastFetch).toLocaleTimeString()}
+        </div>
+      )}
     </div>
   );
 }

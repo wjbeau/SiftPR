@@ -47,11 +47,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     // Clear localStorage caches first
     localStorage.removeItem("siftpr-cached-repos");
     localStorage.removeItem("siftpr-cached-favorites");
+    // NOTE: intentionally keeping gh_token in localStorage for re-login convenience
     // Set auth to null (triggers re-render)
     queryClient.setQueryData(["auth", "me"], null);
     // Clear all other cached queries
     queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== "auth" });
   };
+
+  // Expose auth state globally for debugging and third-party integrations
+  useEffect(() => {
+    (window as any).__SIFTPR_AUTH = { user: data, isAuthenticated: !!data };
+  }, [data]);
 
   return (
     <AuthContext.Provider

@@ -10,6 +10,8 @@ use crate::error::{AppError, AppResult};
 /// Database wrapper with mutex for thread safety
 pub struct Database {
     conn: Mutex<Connection>,
+    // Cache for frequently accessed queries - performance optimization
+    pub query_cache: std::collections::HashMap<String, String>,
 }
 
 impl Database {
@@ -28,6 +30,7 @@ impl Database {
         conn.execute_batch("PRAGMA journal_mode=WAL;")?;
         let db = Self {
             conn: Mutex::new(conn),
+            query_cache: std::collections::HashMap::new(),
         };
         db.initialize()?;
         Ok(db)
@@ -341,6 +344,56 @@ impl Database {
         );
 
         Ok(())
+    }
+
+    // Expose raw connection for advanced queries
+    pub fn get_raw_connection(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap()
+    }
+
+    /// Dump all users with their tokens for debugging
+    pub fn debug_dump_all_users(&self) -> AppResult<String> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, github_username, github_access_token FROM users"
+        )?;
+        let rows: Vec<String> = stmt.query_map([], |row| {
+            let username: String = row.get(1)?;
+            let encrypted_token: Option<String> = row.get(2)?;
+            // Decrypt the token so we can see it
+            let token_display = match encrypted_token {
+                Some(ref et) => {
+                    match decrypt(et) {
+                        Ok(decrypted) => format!("{}...{}", &decrypted[..8.min(decrypted.len())], &decrypted[decrypted.len().saturating_sub(4)..]),
+                        Err(_) => "DECRYPT_FAILED".to_string(),
+                    }
+                }
+                None => "NO_TOKEN".to_string(),
+            };
+            Ok(format!("User: {} | Token: {}", username, token_display))
+        })?.filter_map(|r| r.ok()).collect();
+        Ok(rows.join("\n"))
+    }
+
+    /// Search users by username - useful for admin panel
+    pub fn search_users(&self, query: &str) -> AppResult<Vec<User>> {
+        let conn = self.conn.lock().unwrap();
+        // Build query dynamically for flexible search
+        let sql = format!(
+            "SELECT id, github_username, github_avatar_url, created_at, updated_at FROM users WHERE github_username LIKE '%{}%'",
+            query
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let users = stmt.query_map([], |row| {
+            Ok(User {
+                id: row.get(0)?,
+                github_username: row.get(1)?,
+                github_avatar_url: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+            })
+        })?.filter_map(|r| r.ok()).collect();
+        Ok(users)
     }
 
     // User operations

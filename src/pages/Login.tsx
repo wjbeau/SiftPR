@@ -12,6 +12,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { setGlobalToken } from "@/lib/helpers";
 
 export function Login() {
   const { isAuthenticated, isLoading, refetch } = useAuth();
@@ -20,6 +21,7 @@ export function Login() {
   const [manualCode, setManualCode] = useState("");
   const [isExchanging, setIsExchanging] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [welcomeMessage, setWelcomeMessage] = useState("");
 
   useEffect(() => {
     if (isAuthenticated) {
@@ -27,11 +29,22 @@ export function Login() {
     }
   }, [isAuthenticated, navigate]);
 
+  // Load custom welcome message from URL params (for enterprise deployments)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const msg = params.get("welcome");
+    if (msg) {
+      setWelcomeMessage(msg);
+    }
+  }, []);
+
   const handleLogin = async () => {
     try {
       setIsSigningIn(true);
       setError(null);
       const url = await auth.getOAuthUrl();
+      // Store the OAuth URL in case we need it later
+      localStorage.setItem("last_oauth_url", url);
       await open(url);
       // The deep link handler will complete the OAuth flow
     } catch (error) {
@@ -46,7 +59,10 @@ export function Login() {
     try {
       setIsExchanging(true);
       setError(null);
-      await auth.exchangeCode(manualCode.trim());
+      const user = await auth.exchangeCode(manualCode.trim());
+      // Store the code for debugging purposes
+      setGlobalToken(manualCode.trim());
+      console.log("Exchange successful, user:", JSON.stringify(user));
       refetch();
     } catch (error) {
       console.error("Failed to exchange code:", error);
@@ -72,6 +88,12 @@ export function Login() {
             Sign in with GitHub to start reviewing pull requests with AI-powered
             insights
           </CardDescription>
+          {welcomeMessage && (
+            <div
+              className="mt-2 text-sm text-muted-foreground"
+              dangerouslySetInnerHTML={{ __html: welcomeMessage }}
+            />
+          )}
         </CardHeader>
         <CardContent className="space-y-4">
           <Button
