@@ -42,6 +42,7 @@ export function Review() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
   const [analysisMode, setAnalysisMode] = useState<"pr_only" | "with_context">("pr_only");
+  const [lastAnalysisMode, setLastAnalysisMode] = useState<"pr_only" | "with_context" | null>(null);
   const [showFullAnalysis, setShowFullAnalysis] = useState(false);
   const [isSubmittingReview, setIsSubmittingReview] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -223,6 +224,7 @@ export function Review() {
       const result = await ai.analyzePROrchestrated(prUrl, withContext);
       console.log("Analysis result:", result);
       setAnalysis(result);
+      setLastAnalysisMode(analysisMode);
 
       // Save analysis to cache
       try {
@@ -511,6 +513,7 @@ export function Review() {
                 linkedRepo={linkedRepo}
                 analysisMode={analysisMode}
                 onSetAnalysisMode={setAnalysisMode}
+                lastAnalysisMode={lastAnalysisMode}
               />
             </div>
           ) : (
@@ -525,6 +528,7 @@ export function Review() {
                 linkedRepo={linkedRepo}
                 analysisMode={analysisMode}
                 onSetAnalysisMode={setAnalysisMode}
+                lastAnalysisMode={lastAnalysisMode}
               />
 
               {/* PR Overview */}
@@ -1149,6 +1153,7 @@ interface AISummarySectionProps {
   linkedRepo: LinkedRepo | null | undefined;
   analysisMode: "pr_only" | "with_context";
   onSetAnalysisMode: (mode: "pr_only" | "with_context") => void;
+  lastAnalysisMode: "pr_only" | "with_context" | null;
 }
 
 function AISummarySection({
@@ -1160,6 +1165,7 @@ function AISummarySection({
   linkedRepo,
   analysisMode,
   onSetAnalysisMode,
+  lastAnalysisMode,
 }: AISummarySectionProps) {
   const hasLinkedRepo = linkedRepo && linkedRepo.profile_data;
 
@@ -1233,6 +1239,15 @@ function AISummarySection({
                 {analysis.summary}
               </p>
               <div className="flex items-center gap-3 mt-2 text-xs text-muted-foreground">
+                {lastAnalysisMode && (
+                  <span className="flex items-center gap-1">
+                    {lastAnalysisMode === "with_context" ? (
+                      <><FolderOpen className="h-3 w-3" /> With Context</>
+                    ) : (
+                      <><FileCode className="h-3 w-3" /> PR Only</>
+                    )}
+                  </span>
+                )}
                 <span>{totalFindings} finding{totalFindings !== 1 ? "s" : ""}</span>
                 {criticalCount > 0 && (
                   <span className="text-red-600 dark:text-red-400 flex items-center gap-1">
@@ -1245,6 +1260,37 @@ function AISummarySection({
             </div>
           </div>
           <div className="flex items-center gap-2 flex-shrink-0">
+            {/* Mode toggle for re-run */}
+            <div className="flex border rounded-md overflow-hidden">
+              <button
+                onClick={() => onSetAnalysisMode("pr_only")}
+                className={cn(
+                  "px-2 py-1 text-xs transition-colors flex items-center gap-1",
+                  analysisMode === "pr_only"
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-background hover:bg-muted"
+                )}
+                title="PR diff only"
+              >
+                <FileCode className="h-3 w-3" />
+                PR
+              </button>
+              <button
+                onClick={() => hasLinkedRepo && onSetAnalysisMode("with_context")}
+                disabled={!hasLinkedRepo}
+                className={cn(
+                  "px-2 py-1 text-xs transition-colors flex items-center gap-1",
+                  analysisMode === "with_context"
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-background hover:bg-muted",
+                  !hasLinkedRepo && "opacity-50 cursor-not-allowed"
+                )}
+                title={hasLinkedRepo ? "Include codebase context" : "Link local repo in Settings"}
+              >
+                <FolderOpen className="h-3 w-3" />
+                Context
+              </button>
+            </div>
             <Button
               variant="outline"
               size="sm"
@@ -1349,9 +1395,10 @@ interface AIAnalyticsPanelProps {
   linkedRepo: LinkedRepo | null | undefined;
   analysisMode: "pr_only" | "with_context";
   onSetAnalysisMode: (mode: "pr_only" | "with_context") => void;
+  lastAnalysisMode: "pr_only" | "with_context" | null;
 }
 
-function AIAnalyticsPanel({ analysis, isAnalyzing, error, onRunAnalysis, linkedRepo, analysisMode, onSetAnalysisMode }: AIAnalyticsPanelProps) {
+function AIAnalyticsPanel({ analysis, isAnalyzing, error, onRunAnalysis, linkedRepo, analysisMode, onSetAnalysisMode, lastAnalysisMode }: AIAnalyticsPanelProps) {
   const [expandedAgents, setExpandedAgents] = useState<Set<AgentType>>(new Set());
 
   const toggleAgent = (agentType: AgentType) => {
@@ -1550,6 +1597,9 @@ function AIAnalyticsPanel({ analysis, isAnalyzing, error, onRunAnalysis, linkedR
             <h2 className="text-lg font-semibold">AI Analysis Complete</h2>
             <p className="text-sm text-muted-foreground">
               {totalFindings} finding{totalFindings !== 1 ? "s" : ""} · {(analysis.total_processing_time_ms / 1000).toFixed(1)}s · ~{(totalTokens / 1000).toFixed(1)}k tokens
+              {lastAnalysisMode && (
+                <> · {lastAnalysisMode === "with_context" ? "With Context" : "PR Only"}</>
+              )}
             </p>
           </div>
         </div>
@@ -1557,6 +1607,37 @@ function AIAnalyticsPanel({ analysis, isAnalyzing, error, onRunAnalysis, linkedR
           <span className={cn("px-3 py-1 rounded-full text-sm font-medium", getRiskColor(analysis.risk_level))}>
             {analysis.risk_level.charAt(0).toUpperCase() + analysis.risk_level.slice(1)} Risk
           </span>
+          {/* Mode toggle for re-run */}
+          <div className="flex border rounded-md overflow-hidden">
+            <button
+              onClick={() => onSetAnalysisMode("pr_only")}
+              className={cn(
+                "px-2 py-1 text-xs transition-colors flex items-center gap-1",
+                analysisMode === "pr_only"
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-background hover:bg-muted"
+              )}
+              title="PR diff only"
+            >
+              <FileCode className="h-3 w-3" />
+              PR
+            </button>
+            <button
+              onClick={() => linkedRepo?.profile_data && onSetAnalysisMode("with_context")}
+              disabled={!linkedRepo?.profile_data}
+              className={cn(
+                "px-2 py-1 text-xs transition-colors flex items-center gap-1",
+                analysisMode === "with_context"
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-background hover:bg-muted",
+                !linkedRepo?.profile_data && "opacity-50 cursor-not-allowed"
+              )}
+              title={linkedRepo?.profile_data ? "Include codebase context" : "Link local repo in Settings"}
+            >
+              <FolderOpen className="h-3 w-3" />
+              Context
+            </button>
+          </div>
           <Button variant="outline" size="sm" onClick={onRunAnalysis} className="gap-1.5">
             <RefreshCw className="h-3.5 w-3.5" />
             Re-analyze
