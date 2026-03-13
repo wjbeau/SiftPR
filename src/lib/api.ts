@@ -440,6 +440,12 @@ export interface AgentInfo {
   default_prompt: string;
 }
 
+// Internal Agent Config (shared by profiler + research)
+export interface InternalAgentConfig {
+  provider: string;
+  model: string;
+}
+
 // Agents API
 export const agents = {
   getSettings: () => invoke<AgentSettings[]>("agents_get_settings"),
@@ -460,6 +466,10 @@ export const agents = {
     invoke<{ available: boolean; provider: string | null }>(
       "agents_get_embedding_capability"
     ),
+  getInternalConfig: () =>
+    invoke<InternalAgentConfig | null>("agents_get_internal_config"),
+  setInternalConfig: (provider: string, model: string) =>
+    invoke<void>("agents_set_internal_config", { provider, model }),
 };
 
 // Service Keys (for SerpAPI, etc.)
@@ -579,13 +589,15 @@ export interface DraftComment {
   line_start: number;
   line_end: number;
   body: string;
+  new_line_num: number | null;
+  new_line_num_start: number | null;
   created_at: string;
   updated_at: string;
 }
 
 export const draftComments = {
-  save: (owner: string, repo: string, prNumber: number, filePath: string, lineStart: number, lineEnd: number, body: string) =>
-    invoke<DraftComment>("draft_comments_save", { owner, repo, prNumber, filePath, lineStart, lineEnd, body }),
+  save: (owner: string, repo: string, prNumber: number, filePath: string, lineStart: number, lineEnd: number, body: string, newLineNum?: number, newLineNumStart?: number) =>
+    invoke<DraftComment>("draft_comments_save", { owner, repo, prNumber, filePath, lineStart, lineEnd, body, newLineNum: newLineNum ?? null, newLineNumStart: newLineNumStart ?? null }),
   get: (owner: string, repo: string, prNumber: number) =>
     invoke<DraftComment[]>("draft_comments_get", { owner, repo, prNumber }),
   update: (id: string, body: string) =>
@@ -601,19 +613,13 @@ export type IndexStatus = "pending" | "indexing" | "complete" | "failed";
 export type ChunkType = "function" | "method" | "class" | "struct" | "interface" | "enum" | "trait" | "module";
 
 export interface CodebaseIndexStatus {
-  id: string;
-  repo_full_name: string;
-  local_path: string;
+  status: string;
   last_indexed_commit: string | null;
-  embedding_provider: string;
-  embedding_model: string;
   total_chunks: number;
-  index_status: IndexStatus;
   error_message: string | null;
   files_total: number;
   files_processed: number;
   chunks_processed: number;
-  created_at: string;
   updated_at: string;
 }
 
@@ -645,6 +651,8 @@ export const indexing = {
     invoke<void>("codebase_index_start", { repoFullName, withEmbeddings }),
   getStatus: (repoFullName: string) =>
     invoke<CodebaseIndexStatus | null>("codebase_index_status", { repoFullName }),
+  cancel: (repoFullName: string) =>
+    invoke<void>("codebase_index_cancel", { repoFullName }),
   semanticSearch: (repoFullName: string, query: string, limit?: number, threshold?: number) =>
     invoke<SemanticSearchResult[]>("codebase_semantic_search", { repoFullName, query, limit, threshold }),
 };

@@ -484,8 +484,9 @@ async fn ai_analyze_pr_orchestrated(
         };
         let linked_path = linked.map(|l| l.local_path);
 
-        // Get agent settings and convert to AgentConfigs
+        // Get agent settings and convert to AgentConfigs (analysis agents only)
         let agent_settings = app.db.get_agent_settings(&user.id)?;
+
         let configs: Vec<AgentConfig> = [
             AgentType::Security,
             AgentType::Architecture,
@@ -493,12 +494,13 @@ async fn ai_analyze_pr_orchestrated(
             AgentType::Performance,
         ].iter().map(|agent_type| {
             let setting = agent_settings.iter().find(|s| s.agent_type == agent_type.as_str());
+
             AgentConfig {
                 agent_type: *agent_type,
                 enabled: setting.map(|s| s.enabled).unwrap_or(true),
                 model_override: setting.and_then(|s| s.model_override.clone()),
                 custom_prompt: setting.and_then(|s| s.custom_prompt.clone()),
-                use_tools: linked_path.is_some(), // Enable tools if repo is linked
+                use_tools: linked_path.is_some(),
             }
         }).collect();
 
@@ -714,10 +716,9 @@ async fn codebase_analyze(
         app.db.update_repo_profile(&user_id, &repo_full_name, &commit_sha, &profile)?;
     }
 
-    // Step 2: AI profiling — if an AI provider is configured and the profiler agent is enabled
+    // Step 2: AI profiling — uses the shared internal agent config (or falls back to active provider)
     let ai_config = {
         let app = state.lock().unwrap();
-        let active = app.db.get_active_ai_setting(&user_id)?;
         let agent_settings = app.db.get_agent_settings(&user_id)?;
         let profiler_setting = agent_settings.iter().find(|s| s.agent_type == "profiler");
 
@@ -725,14 +726,17 @@ async fn codebase_analyze(
         let enabled = profiler_setting.map(|s| s.enabled).unwrap_or(true);
         if !enabled {
             None
-        } else if let Some((settings, key)) = active {
-            let model = profiler_setting
-                .and_then(|s| s.model_override.clone())
-                .unwrap_or(settings.model_preference.clone());
-            let custom_prompt = profiler_setting.and_then(|s| s.custom_prompt.clone());
-            Some((settings.provider, key, model, custom_prompt))
         } else {
-            None
+            let custom_prompt = profiler_setting.and_then(|s| s.custom_prompt.clone());
+
+            // Use shared internal agent config first, fall back to active AI provider
+            if let Some((provider, api_key, model)) = app.db.get_internal_agent_config(&user_id)? {
+                Some((provider, api_key, model, custom_prompt))
+            } else if let Some((settings, key)) = app.db.get_active_ai_setting(&user_id)? {
+                Some((settings.provider, key, settings.model_preference, custom_prompt))
+            } else {
+                None
+            }
         }
     };
 
@@ -896,35 +900,44 @@ async fn codebase_index_start(
         let embed_model = match embedding_provider.as_str() {
             "openai" => "text-embedding-3-small",
             "google" => "gemini-embedding-001",
+            "ollama" => "nomic-embed-text",
             _ => "text-embedding-3-small",
-        };
+        }.to_string();
 
-        let db = {
-            let _app = state.lock().unwrap();
-            db::Database::new()?
-        };
+        // Spawn the indexing work in the background so the command returns immediately.
+        // The frontend polls codebase_index_status to track progress.
+        tokio::spawn(async move {
+            let db = match db::Database::new() {
+                Ok(db) => db,
+                Err(e) => {
+                    println!("[Index] Failed to open database: {}", e);
+                    return;
+                }
+            };
 
-        let result = indexer::index_repository(
-            &db,
-            &user_id,
-            &repo_full_name,
-            &local_path,
-            &embedding_provider,
-            embed_model,
-            &api_key,
-        ).await;
+            let result = indexer::index_repository(
+                &db,
+                &user_id,
+                &repo_full_name,
+                &local_path,
+                &embedding_provider,
+                &embed_model,
+                &api_key,
+            ).await;
 
-        if let Err(ref e) = result {
-            if let Ok(Some(index)) = db.get_codebase_index(&user_id, &repo_full_name) {
-                let _ = db.update_index_status(
-                    &index.id,
-                    crate::db::IndexStatus::Failed,
-                    Some(&e.to_string()),
-                );
+            if let Err(ref e) = result {
+                println!("[Index] Indexing failed: {}", e);
+                if let Ok(Some(index)) = db.get_codebase_index(&user_id, &repo_full_name) {
+                    let _ = db.update_index_status(
+                        &index.id,
+                        crate::db::IndexStatus::Failed,
+                        Some(&e.to_string()),
+                    );
+                }
+            } else {
+                println!("[Index] Indexing completed successfully for {}", repo_full_name);
             }
-        }
-
-        result?;
+        });
     } else {
         println!("[Index] No embedding provider configured, skipping semantic indexing");
     }
@@ -952,6 +965,26 @@ fn codebase_index_status(
         chunks_processed: idx.chunks_processed,
         updated_at: idx.updated_at,
     }))
+}
+
+#[tauri::command]
+fn codebase_index_cancel(
+    repo_full_name: String,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<()> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+
+    if let Some(index) = app.db.get_codebase_index(&user.id, &repo_full_name)? {
+        // Reset to failed so it can be restarted
+        app.db.update_index_status(
+            &index.id,
+            crate::db::IndexStatus::Failed,
+            Some("Cancelled by user"),
+        )?;
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -1118,6 +1151,38 @@ fn agents_get_embedding_capability(
     }
 }
 
+// Internal Agent Config commands
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct InternalAgentConfig {
+    pub provider: String,
+    pub model: String,
+}
+
+#[tauri::command]
+fn agents_get_internal_config(
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<Option<InternalAgentConfig>> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+
+    match app.db.get_internal_agent_config(&user.id)? {
+        Some((provider, _api_key, model)) => Ok(Some(InternalAgentConfig { provider, model })),
+        None => Ok(None),
+    }
+}
+
+#[tauri::command]
+fn agents_set_internal_config(
+    provider: String,
+    model: String,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<()> {
+    let app = state.lock().unwrap();
+    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
+    app.db.set_internal_agent_config(&user.id, &provider, &model)
+}
+
 // Service Keys commands (for SerpAPI, etc.)
 
 #[tauri::command]
@@ -1270,11 +1335,13 @@ fn draft_comments_save(
     line_start: i64,
     line_end: i64,
     body: String,
+    new_line_num: Option<i64>,
+    new_line_num_start: Option<i64>,
     state: State<'_, Mutex<AppState>>,
 ) -> AppResult<DraftComment> {
     let app = state.lock().unwrap();
     let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
-    app.db.save_draft_comment(&user.id, &owner, &repo, pr_number, &file_path, line_start, line_end, &body)
+    app.db.save_draft_comment(&user.id, &owner, &repo, pr_number, &file_path, line_start, line_end, &body, new_line_num, new_line_num_start)
 }
 
 #[tauri::command]
@@ -1375,11 +1442,14 @@ pub fn run() {
             codebase_clone_repo,
             codebase_index_start,
             codebase_index_status,
+            codebase_index_cancel,
             codebase_semantic_search,
             agents_get_settings,
             agents_save_setting,
             agents_get_defaults,
             agents_get_embedding_capability,
+            agents_get_internal_config,
+            agents_set_internal_config,
             service_keys_get,
             service_keys_set,
             service_keys_delete,

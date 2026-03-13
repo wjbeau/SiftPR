@@ -33,6 +33,7 @@ import {
   BookOpen,
   Braces,
   Settings2,
+  Square,
 } from "lucide-react";
 import { formatDistanceToNow } from "@/lib/utils";
 import {
@@ -77,21 +78,19 @@ export function Repositories() {
     },
     enabled: !!linkedRepos && linkedRepos.length > 0,
     refetchInterval: (query) => {
-      // Poll every 2s while any repo is indexing
+      // Poll every 2s while any repo is indexing or pending
       const statuses = query.state.data;
       if (statuses) {
         const isAnyIndexing = Object.values(statuses).some(
-          (s) => s?.index_status === "indexing"
+          (s) => s?.status === "indexing" || s?.status === "pending"
         );
         if (isAnyIndexing) return 2000;
       }
-      // Also poll if we just triggered indexing
-      if (indexingRepo) return 2000;
       return false;
     },
   });
 
-  // Check if embedding-capable provider is configured
+  // Check if embedding-capable provider is configured (via internal agent config)
   const { data: embeddingCapability } = useQuery({
     queryKey: ["agents", "embedding-capability"],
     queryFn: () => agents.getEmbeddingCapability(),
@@ -192,12 +191,12 @@ export function Repositories() {
     }, 500);
   };
 
-  // Clear indexingRepo when polling detects completion
+  // Clear transient indexingRepo once the DB status catches up
   const currentStatuses = indexStatusQueries.data;
   if (indexingRepo && currentStatuses?.[indexingRepo]) {
-    const status = currentStatuses[indexingRepo]!.index_status;
-    if (status === "complete" || status === "failed") {
-      // Use setTimeout to avoid setState during render
+    const status = currentStatuses[indexingRepo]!.status;
+    if (status === "indexing" || status === "pending" || status === "complete" || status === "failed") {
+      // DB has the real status now, no need for the local flag
       setTimeout(() => setIndexingRepo(null), 0);
     }
   }
@@ -213,16 +212,11 @@ export function Repositories() {
       return { label: "Not indexed", color: "text-muted-foreground", isStale: false, progress: null };
     }
 
-    if (indexStatus.index_status === "failed") {
+    if (indexStatus.status === "failed") {
       return { label: "Index failed", color: "text-destructive", isStale: false, progress: null };
     }
 
-    if (indexStatus.index_status === "indexing" || indexStatus.index_status === "pending") {
-      // Show as indexing if we triggered it or the DB says indexing/pending
-      if (indexStatus.index_status === "pending" && repoFullName !== indexingRepo) {
-        return { label: "Pending", color: "text-muted-foreground", isStale: false, progress: null };
-      }
-
+    if (indexStatus.status === "indexing" || indexStatus.status === "pending") {
       const ft = indexStatus.files_total || 0;
       const fp = indexStatus.files_processed || 0;
       const cp = indexStatus.chunks_processed || 0;
@@ -239,7 +233,7 @@ export function Repositories() {
       return { label: "Indexing...", color: "text-blue-600 dark:text-blue-400", isStale: false, progress };
     }
 
-    if (indexStatus.index_status === "complete") {
+    if (indexStatus.status === "complete") {
       const isStale = linkedRepo?.last_analyzed_commit &&
         indexStatus.last_indexed_commit !== linkedRepo.last_analyzed_commit;
 
@@ -562,8 +556,8 @@ export function Repositories() {
                   {(() => {
                     const { label, color, isStale, progress } = getIndexStatusInfo(repo.repo_full_name);
                     const indexStatus = indexStatusQueries.data?.[repo.repo_full_name];
-                    const isComplete = indexStatus?.index_status === "complete";
-                    const isFailed = indexStatus?.index_status === "failed";
+                    const isComplete = indexStatus?.status === "complete";
+                    const isFailed = indexStatus?.status === "failed";
                     const isIndexing = !!progress;
                     const hasEmbeddings = embeddingCapability?.available;
 
@@ -583,24 +577,40 @@ export function Repositories() {
                             <span className={color}>{label}</span>
                           </div>
                           {hasEmbeddings && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              onClick={() => handleIndexRepo(repo.repo_full_name)}
-                              disabled={indexingRepo === repo.repo_full_name || !repo.last_analyzed_commit}
-                            >
-                              {indexingRepo === repo.repo_full_name ? (
-                                <>
-                                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
-                                  Generating...
-                                </>
-                              ) : (
-                                <>
-                                  <Database className="h-4 w-4 mr-2" />
-                                  {isComplete ? "Regenerate" : "Generate Embeddings"}
-                                </>
+                            <div className="flex items-center gap-1">
+                              {isIndexing && (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  className="text-destructive hover:text-destructive h-8 w-8 p-0"
+                                  title="Cancel embedding generation"
+                                  onClick={async () => {
+                                    await indexing.cancel(repo.repo_full_name);
+                                    queryClient.invalidateQueries({ queryKey: ["codebase", "index-status"] });
+                                  }}
+                                >
+                                  <Square className="h-3.5 w-3.5" />
+                                </Button>
                               )}
-                            </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => handleIndexRepo(repo.repo_full_name)}
+                                disabled={isIndexing || !repo.last_analyzed_commit}
+                              >
+                                {isIndexing ? (
+                                  <>
+                                    <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                                    Generating...
+                                  </>
+                                ) : (
+                                  <>
+                                    <Database className="h-4 w-4 mr-2" />
+                                    {isComplete ? "Regenerate" : "Generate Embeddings"}
+                                  </>
+                                )}
+                              </Button>
+                            </div>
                           )}
                         </div>
 
@@ -615,30 +625,47 @@ export function Repositories() {
                                 {!repo.last_analyzed_commit && " Analyze the repository first."}
                               </>
                             ) : (
-                              "Add an OpenAI or Google API key in Providers to enable semantic embeddings."
+                              "Configure an internal agent model in the Agents tab to enable semantic embeddings."
                             )}
                           </p>
                         )}
 
                         {/* Progress bar during indexing */}
                         {isIndexing && (
-                          <div className="flex items-center gap-2 pl-6">
-                            <span className="text-xs text-muted-foreground">{progress}</span>
-                            {indexStatus && indexStatus.files_total > 0 && (
-                              <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden max-w-[140px]">
-                                <div
-                                  className="h-full bg-blue-500 rounded-full transition-all duration-300"
-                                  style={{
-                                    width: `${Math.min(
-                                      100,
-                                      indexStatus.files_processed < indexStatus.files_total
-                                        ? (indexStatus.files_processed / indexStatus.files_total) * 100
-                                        : 100
-                                    )}%`,
-                                  }}
-                                />
-                              </div>
-                            )}
+                          <div className="space-y-1.5 pl-6">
+                            <div className="flex items-center gap-2">
+                              <span className="text-xs text-muted-foreground">{progress}</span>
+                            </div>
+                            {indexStatus && indexStatus.files_total > 0 && (() => {
+                              // Two-phase progress: parsing (0-50%) then embedding (50-100%)
+                              const ft = indexStatus.files_total;
+                              const fp = indexStatus.files_processed;
+                              const cp = indexStatus.chunks_processed;
+                              const tc = indexStatus.total_chunks;
+                              const parsingDone = fp >= ft;
+
+                              let pct: number;
+                              if (!parsingDone) {
+                                // Phase 1: parsing files (0% to 50%)
+                                pct = (fp / ft) * 50;
+                              } else if (tc > 0 && cp < tc) {
+                                // Phase 2: generating embeddings (50% to 100%)
+                                pct = 50 + (cp / tc) * 50;
+                              } else if (tc > 0 && cp >= tc) {
+                                pct = 100;
+                              } else {
+                                pct = 50; // parsed but no chunk info yet
+                              }
+
+                              return (
+                                <div className="flex-1 h-1.5 bg-muted rounded-full overflow-hidden max-w-[200px]">
+                                  <div
+                                    className="h-full bg-blue-500 rounded-full transition-all duration-300"
+                                    style={{ width: `${Math.min(100, pct)}%` }}
+                                  />
+                                </div>
+                              );
+                            })()}
                           </div>
                         )}
 

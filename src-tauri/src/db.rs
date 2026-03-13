@@ -331,6 +331,14 @@ impl Database {
             "ALTER TABLE codebase_indexes ADD COLUMN chunks_processed INTEGER DEFAULT 0",
             [],
         );
+        let _ = conn.execute(
+            "ALTER TABLE draft_comments ADD COLUMN new_line_num INTEGER",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE draft_comments ADD COLUMN new_line_num_start INTEGER",
+            [],
+        );
 
         Ok(())
     }
@@ -632,13 +640,29 @@ impl Database {
         }
     }
 
-    /// Find the best configured provider that supports embeddings.
-    /// Preference order: openai > google > voyage/anthropic.
-    /// Falls back to the active provider if none of the preferred ones are configured.
+    /// Get the embedding provider. Uses the internal agent config if set,
+    /// otherwise falls back to auto-detection (ollama > openai > google).
     pub fn get_embedding_provider(&self, user_id: &str) -> AppResult<Option<(String, String)>> {
+        // If internal agent config is set, derive embedding provider from it
+        if let Some((provider, api_key, _model)) = self.get_internal_agent_config(user_id)? {
+            return Ok(Some((provider, api_key)));
+        }
+
         let conn = self.conn.lock().unwrap();
 
-        // Providers that support embeddings, in preference order
+        // Fallback: Check for Ollama (stored as a service key)
+        let ollama_url: Option<String> = conn.query_row(
+            "SELECT api_key FROM user_service_keys WHERE user_id = ?1 AND service_name = 'ollama_url'",
+            params![user_id],
+            |row| row.get(0),
+        ).optional()?;
+
+        if let Some(encrypted_url) = ollama_url {
+            let url = decrypt(&encrypted_url)?;
+            return Ok(Some(("ollama".to_string(), url)));
+        }
+
+        // Fallback: Cloud providers that support embeddings
         let embedding_providers = ["openai", "google"];
 
         for provider in &embedding_providers {
@@ -1273,6 +1297,79 @@ impl Database {
         Ok(())
     }
 
+    // Internal Agent Config operations
+    //
+    // The internal agents (profiler + research) share a single AI provider/model.
+    // Stored as service keys: internal_agent_provider, internal_agent_model.
+    // The embedding provider is derived from this same config.
+
+    /// Get the shared config for internal agents (profiler + research).
+    /// Returns (provider, api_key, model) if configured.
+    pub fn get_internal_agent_config(&self, user_id: &str) -> AppResult<Option<(String, String, String)>> {
+        let conn = self.conn.lock().unwrap();
+
+        // Read stored provider and model
+        let provider: Option<String> = conn.query_row(
+            "SELECT api_key FROM user_service_keys WHERE user_id = ?1 AND service_name = 'internal_agent_provider'",
+            params![user_id],
+            |row| row.get::<_, String>(0),
+        ).ok();
+
+        let model: Option<String> = conn.query_row(
+            "SELECT api_key FROM user_service_keys WHERE user_id = ?1 AND service_name = 'internal_agent_model'",
+            params![user_id],
+            |row| row.get::<_, String>(0),
+        ).ok();
+
+        let (Some(encrypted_provider), Some(encrypted_model)) = (provider, model) else {
+            return Ok(None);
+        };
+
+        let provider = decrypt(&encrypted_provider)?;
+        let model = decrypt(&encrypted_model)?;
+
+        // Resolve API key based on provider
+        let api_key = if provider == "ollama" {
+            // Ollama uses the URL as the "api key"
+            let ollama_url: Option<String> = conn.query_row(
+                "SELECT api_key FROM user_service_keys WHERE user_id = ?1 AND service_name = 'ollama_url'",
+                params![user_id],
+                |row| row.get::<_, String>(0),
+            ).ok();
+
+            if let Some(encrypted_url) = ollama_url {
+                decrypt(&encrypted_url)?
+            } else {
+                "http://localhost:11434".to_string()
+            }
+        } else {
+            // Look up from user_ai_settings by provider name
+            let encrypted_key: Option<String> = conn.query_row(
+                "SELECT api_key FROM user_ai_settings WHERE user_id = ?1 AND provider = ?2",
+                params![user_id, provider],
+                |row| row.get::<_, String>(0),
+            ).ok();
+
+            if let Some(key) = encrypted_key {
+                decrypt(&key)?
+            } else {
+                return Ok(None);
+            }
+        };
+
+        Ok(Some((provider, api_key, model)))
+    }
+
+    /// Set the shared config for internal agents.
+    pub fn set_internal_agent_config(&self, user_id: &str, provider: &str, model: &str) -> AppResult<()> {
+        // Store as encrypted service keys
+        // Drop conn lock between calls by using the existing set_service_key method
+        drop(self.conn.lock()); // just to verify we can acquire
+        self.set_service_key(user_id, "internal_agent_provider", provider)?;
+        self.set_service_key(user_id, "internal_agent_model", model)?;
+        Ok(())
+    }
+
     // Service Keys operations
 
     pub fn get_service_keys(&self, user_id: &str) -> AppResult<Vec<ServiceKeyInfo>> {
@@ -1513,6 +1610,16 @@ impl Database {
         Ok(())
     }
 
+    pub fn update_index_chunks_total(&self, index_id: &str, total_chunks: u32) -> AppResult<()> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "UPDATE codebase_indexes SET total_chunks = ?1, updated_at = ?2 WHERE id = ?3",
+            params![total_chunks, now, index_id],
+        )?;
+        Ok(())
+    }
+
     pub fn update_index_progress(&self, index_id: &str, files_total: u32, files_processed: u32, chunks_processed: u32) -> AppResult<()> {
         let conn = self.conn.lock().unwrap();
         let now = Utc::now().to_rfc3339();
@@ -1725,6 +1832,8 @@ impl Database {
         line_start: i64,
         line_end: i64,
         body: &str,
+        new_line_num: Option<i64>,
+        new_line_num_start: Option<i64>,
     ) -> AppResult<DraftComment> {
         let conn = self.conn.lock().unwrap();
         let id = uuid::Uuid::new_v4().to_string();
@@ -1732,10 +1841,10 @@ impl Database {
 
         conn.execute(
             r#"
-            INSERT INTO draft_comments (id, user_id, repo_owner, repo_name, pr_number, file_path, line_start, line_end, body, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)
+            INSERT INTO draft_comments (id, user_id, repo_owner, repo_name, pr_number, file_path, line_start, line_end, body, new_line_num, new_line_num_start, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?12)
             "#,
-            params![id, user_id, owner, repo, pr_number, file_path, line_start, line_end, body, now],
+            params![id, user_id, owner, repo, pr_number, file_path, line_start, line_end, body, new_line_num, new_line_num_start, now],
         )?;
 
         Ok(DraftComment {
@@ -1748,6 +1857,8 @@ impl Database {
             line_start,
             line_end,
             body: body.to_string(),
+            new_line_num,
+            new_line_num_start,
             created_at: now.clone(),
             updated_at: now,
         })
@@ -1762,7 +1873,7 @@ impl Database {
     ) -> AppResult<Vec<DraftComment>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, user_id, repo_owner, repo_name, pr_number, file_path, line_start, line_end, body, created_at, updated_at
+            "SELECT id, user_id, repo_owner, repo_name, pr_number, file_path, line_start, line_end, body, new_line_num, new_line_num_start, created_at, updated_at
              FROM draft_comments WHERE user_id = ?1 AND repo_owner = ?2 AND repo_name = ?3 AND pr_number = ?4
              ORDER BY created_at ASC"
         )?;
@@ -1778,8 +1889,10 @@ impl Database {
                 line_start: row.get(6)?,
                 line_end: row.get(7)?,
                 body: row.get(8)?,
-                created_at: row.get(9)?,
-                updated_at: row.get(10)?,
+                new_line_num: row.get(9)?,
+                new_line_num_start: row.get(10)?,
+                created_at: row.get(11)?,
+                updated_at: row.get(12)?,
             })
         })?.collect::<Result<Vec<_>, _>>()?;
 
@@ -1870,6 +1983,8 @@ pub struct DraftComment {
     pub line_start: i64,
     pub line_end: i64,
     pub body: String,
+    pub new_line_num: Option<i64>,
+    pub new_line_num_start: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
 }

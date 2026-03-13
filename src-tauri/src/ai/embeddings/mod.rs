@@ -298,12 +298,114 @@ impl EmbeddingProvider for VoyageEmbeddings {
     }
 }
 
+/// Ollama local embedding provider
+/// Uses the Ollama API (OpenAI-compatible) at a configurable base URL.
+/// The `api_key` parameter is used to pass the base URL instead (no auth needed).
+pub struct OllamaEmbeddings;
+
+/// Default Ollama base URL
+pub const OLLAMA_DEFAULT_URL: &str = "http://localhost:11434";
+
+#[async_trait]
+impl EmbeddingProvider for OllamaEmbeddings {
+    fn provider_name(&self) -> &'static str {
+        "ollama"
+    }
+
+    fn default_model(&self) -> &'static str {
+        "nomic-embed-text"
+    }
+
+    fn dimensions(&self, model: &str) -> usize {
+        match model {
+            "nomic-embed-text" => 768,
+            "mxbai-embed-large" => 1024,
+            "all-minilm" => 384,
+            "snowflake-arctic-embed" => 1024,
+            _ => 768,
+        }
+    }
+
+    async fn embed_texts(
+        &self,
+        api_key: &str, // Repurposed: this is the base URL for Ollama
+        model: &str,
+        texts: &[String],
+    ) -> AppResult<Vec<Vec<f32>>> {
+        let base_url = if api_key.is_empty() { OLLAMA_DEFAULT_URL } else { api_key };
+        let url = format!("{}/api/embed", base_url.trim_end_matches('/'));
+        let client = reqwest::Client::new();
+
+        #[derive(Serialize)]
+        struct OllamaEmbedRequest<'a> {
+            model: &'a str,
+            input: &'a [String],
+        }
+
+        #[derive(Deserialize)]
+        struct OllamaEmbedResponse {
+            embeddings: Vec<Vec<f32>>,
+        }
+
+        // Truncate texts to stay within the model's context window.
+        // Code tokenizes densely (~2 chars/token), so be conservative.
+        // nomic-embed-text has 8192 token limit → ~2000 chars for code is safe.
+        const MAX_CHARS: usize = 2000;
+        let truncated: Vec<String> = texts.iter().map(|t| {
+            if t.len() > MAX_CHARS {
+                let mut end = MAX_CHARS;
+                while end > 0 && !t.is_char_boundary(end) {
+                    end -= 1;
+                }
+                t[..end].to_string()
+            } else {
+                t.clone()
+            }
+        }).collect();
+
+        // Send one text at a time to avoid exceeding Ollama's total context limit
+        let mut all_embeddings = Vec::with_capacity(truncated.len());
+        for text in &truncated {
+            let batch = vec![text.clone()];
+            let response = client
+                .post(&url)
+                .header("Content-Type", "application/json")
+                .json(&OllamaEmbedRequest { model, input: &batch })
+                .send()
+                .await
+                .map_err(|e| AppError::Embedding(format!(
+                    "Failed to connect to Ollama at {}: {}. Is Ollama running?",
+                    base_url, e
+                )))?;
+
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                return Err(AppError::Embedding(format!(
+                    "Ollama API error {}: {}",
+                    status, body
+                )));
+            }
+
+            let result: OllamaEmbedResponse = response
+                .json()
+                .await
+                .map_err(|e| AppError::Embedding(format!("JSON parse error: {}", e)))?;
+
+            all_embeddings.extend(result.embeddings);
+        }
+
+        Ok(all_embeddings)
+    }
+}
+
 /// Get an embedding provider by name
 pub fn get_provider(name: &str) -> Option<Box<dyn EmbeddingProvider>> {
     match name.to_lowercase().as_str() {
         "openai" => Some(Box::new(OpenAIEmbeddings)),
         "google" => Some(Box::new(GoogleEmbeddings)),
         "voyage" | "anthropic" => Some(Box::new(VoyageEmbeddings)),
+        "ollama" => Some(Box::new(OllamaEmbeddings)),
         _ => None,
     }
 }
@@ -314,6 +416,7 @@ pub fn get_dimensions(provider: &str, model: &str) -> usize {
         "openai" => OpenAIEmbeddings.dimensions(model),
         "google" => GoogleEmbeddings.dimensions(model),
         "voyage" | "anthropic" => VoyageEmbeddings.dimensions(model),
+        "ollama" => OllamaEmbeddings.dimensions(model),
         _ => 1536, // Default to OpenAI dimensions
     }
 }

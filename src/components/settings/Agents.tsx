@@ -336,6 +336,161 @@ function AgentCard({ agent, settings, providerModels, embeddingCapability, onSav
   );
 }
 
+interface InternalAgentCardProps {
+  agent: AgentInfo;
+  settings: AgentSettings | undefined;
+  onSave: (
+    agentType: string,
+    modelOverride: string | null,
+    customPrompt: string | null,
+    enabled: boolean
+  ) => Promise<void>;
+  isSaving: boolean;
+}
+
+function InternalAgentCard({ agent, settings: agentSettings, onSave, isSaving }: InternalAgentCardProps) {
+  const [isOpen, setIsOpen] = useState(false);
+  const [enabled, setEnabled] = useState(agentSettings?.enabled ?? true);
+  const [customPrompt, setCustomPrompt] = useState(agentSettings?.custom_prompt ?? "");
+  const [hasChanges, setHasChanges] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+
+  const iconConfig = AGENT_ICONS[agent.agent_type] || AGENT_ICONS.security;
+  const Icon = iconConfig.icon;
+
+  useEffect(() => {
+    const originalEnabled = agentSettings?.enabled ?? true;
+    const originalPrompt = agentSettings?.custom_prompt ?? "";
+    setHasChanges(enabled !== originalEnabled || customPrompt !== originalPrompt);
+  }, [enabled, customPrompt, agentSettings]);
+
+  const handleSave = async () => {
+    await onSave(agent.agent_type, null, customPrompt || null, enabled);
+    setHasChanges(false);
+    setSaveSuccess(true);
+    setTimeout(() => setSaveSuccess(false), 2000);
+  };
+
+  const handleResetPrompt = () => setCustomPrompt("");
+
+  const displayPrompt = customPrompt || agent.default_prompt;
+  const isUsingCustomPrompt = customPrompt && customPrompt !== agent.default_prompt;
+
+  return (
+    <div className="border rounded-lg">
+      <button
+        onClick={() => setIsOpen(!isOpen)}
+        className="w-full p-4 flex items-center gap-4 hover:bg-muted/50 transition-colors"
+      >
+        <div className={cn("p-2 rounded-lg", iconConfig.bgColor)}>
+          <Icon className={cn("h-5 w-5", iconConfig.color)} />
+        </div>
+        <div className="flex-1 text-left">
+          <div className="font-medium flex items-center gap-2 flex-wrap">
+            {agent.name}
+            {!enabled && (
+              <span className="text-xs bg-muted px-2 py-0.5 rounded text-muted-foreground">
+                Disabled
+              </span>
+            )}
+            {isUsingCustomPrompt && (
+              <span className="text-xs bg-blue-100 dark:bg-blue-900 px-2 py-0.5 rounded text-blue-700 dark:text-blue-300">
+                Custom Prompt
+              </span>
+            )}
+          </div>
+          <div className="text-sm text-muted-foreground">{agent.description}</div>
+        </div>
+        <ChevronDown
+          className={cn(
+            "h-5 w-5 text-muted-foreground transition-transform",
+            isOpen && "rotate-180"
+          )}
+        />
+      </button>
+
+      {isOpen && (
+        <div className="px-4 pb-4 pt-2 border-t space-y-4">
+          {/* Enable/Disable Toggle */}
+          <div className="flex items-center justify-between">
+            <div>
+              <Label htmlFor={`${agent.agent_type}-enabled`}>Enable Agent</Label>
+              <p className="text-xs text-muted-foreground">
+                {agent.agent_type === "research"
+                  ? "When enabled, other agents can spawn this agent to investigate the codebase"
+                  : "Disabled agents won't run during codebase analysis"}
+              </p>
+            </div>
+            <button
+              id={`${agent.agent_type}-enabled`}
+              onClick={() => setEnabled(!enabled)}
+              className={cn(
+                "relative inline-flex h-6 w-11 items-center rounded-full transition-colors",
+                enabled ? "bg-primary" : "bg-muted"
+              )}
+            >
+              <span
+                className={cn(
+                  "inline-block h-4 w-4 transform rounded-full bg-white transition-transform",
+                  enabled ? "translate-x-6" : "translate-x-1"
+                )}
+              />
+            </button>
+          </div>
+
+          {/* Custom Prompt */}
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <Label htmlFor={`${agent.agent_type}-prompt`}>System Prompt</Label>
+              {isUsingCustomPrompt && (
+                <Button variant="ghost" size="sm" onClick={handleResetPrompt} className="h-7 text-xs gap-1">
+                  <RotateCcw className="h-3 w-3" />
+                  Reset to Default
+                </Button>
+              )}
+            </div>
+            <textarea
+              id={`${agent.agent_type}-prompt`}
+              value={displayPrompt}
+              onChange={(e: React.ChangeEvent<HTMLTextAreaElement>) => setCustomPrompt(e.target.value)}
+              className="flex min-h-[200px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              placeholder="Enter custom system prompt..."
+            />
+            <p className="text-xs text-muted-foreground">
+              {isUsingCustomPrompt
+                ? "Using custom prompt. Click 'Reset to Default' to restore the original."
+                : "Showing default prompt. Edit to customize this agent's behavior."}
+            </p>
+          </div>
+
+          {/* MCP Servers */}
+          <MCPServersSection agentType={agent.agent_type} />
+
+          {/* Save Button */}
+          <div className="flex items-center justify-end gap-2">
+            {saveSuccess && (
+              <span className="text-sm text-green-600 dark:text-green-400 flex items-center gap-1">
+                <Check className="h-4 w-4" />
+                Saved
+              </span>
+            )}
+            <Button onClick={handleSave} disabled={!hasChanges || isSaving} className="gap-2">
+              {isSaving ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Saving...
+                </>
+              ) : (
+                "Save Changes"
+              )}
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MCPServersSection({ agentType }: { agentType: string }) {
   const queryClient = useQueryClient();
   const [showAddForm, setShowAddForm] = useState(false);
@@ -695,6 +850,10 @@ function MCPServersSection({ agentType }: { agentType: string }) {
   );
 }
 
+const ANALYSIS_AGENTS = ["security", "architecture", "style", "performance"];
+const INTERNAL_AGENTS = ["profiler", "research"];
+const EMBEDDING_PROVIDERS = ["openai", "google", "ollama"];
+
 export function Agents() {
   const queryClient = useQueryClient();
   const [savingAgent, setSavingAgent] = useState<string | null>(null);
@@ -711,46 +870,108 @@ export function Agents() {
     queryFn: () => agents.getSettings(),
   });
 
-  // Fetch available models from ALL configured providers (not just active)
-  const { data: providerModels } = useQuery({
-    queryKey: ["agents", "models", "all-providers"],
-    queryFn: async () => {
-      try {
-        const providers = await settings.getAIProviders();
-        const results: ProviderModels[] = [];
-
-        // Fetch models from each configured provider in parallel
-        const fetches = providers.map(async (p) => {
-          try {
-            const models = await settings.fetchModelsForProvider(p.provider);
-            return {
-              provider: p.provider,
-              models: models.map((m) => ({ id: m.id, name: m.name })),
-            };
-          } catch {
-            return { provider: p.provider, models: [] };
-          }
-        });
-
-        const allResults = await Promise.all(fetches);
-        for (const r of allResults) {
-          if (r.models.length > 0) {
-            results.push(r);
-          }
-        }
-
-        return results;
-      } catch {
-        return [];
-      }
-    },
+  // Fetch user's configured AI providers (for model selection dropdown)
+  const { data: aiProviders } = useQuery({
+    queryKey: ["settings", "ai-providers"],
+    queryFn: () => settings.getAIProviders(),
   });
 
-  // Fetch embedding capability for research agent
+  // Fetch internal agent config
+  const { data: internalConfig } = useQuery({
+    queryKey: ["agents", "internal-config"],
+    queryFn: () => agents.getInternalConfig(),
+  });
+
+  // Fetch embedding capability
   const { data: embeddingCapability } = useQuery({
     queryKey: ["agents", "embedding-capability"],
     queryFn: () => agents.getEmbeddingCapability(),
   });
+
+  // Fetch service keys (to check for ollama_url)
+  const { data: serviceKeysList } = useQuery({
+    queryKey: ["service-keys"],
+    queryFn: () => import("@/lib/api").then((m) => m.serviceKeys.get()),
+  });
+
+  // Build model list from user's configured providers (no network calls needed)
+  const providerModels: ProviderModels[] = (() => {
+    if (!aiProviders || aiProviders.length === 0) return [];
+    const byProvider = new Map<string, { id: string; name: string }[]>();
+    for (const p of aiProviders) {
+      if (!byProvider.has(p.provider)) {
+        byProvider.set(p.provider, []);
+      }
+      const models = byProvider.get(p.provider)!;
+      if (!models.some((m) => m.id === p.model_preference)) {
+        models.push({ id: p.model_preference, name: p.model_preference });
+      }
+    }
+    return Array.from(byProvider.entries()).map(([provider, models]) => ({ provider, models }));
+  })();
+
+  // Build embedding-capable model list (only openai, google, ollama)
+  const embeddingProviderModels: ProviderModels[] = (() => {
+    const result: ProviderModels[] = providerModels.filter((pm) =>
+      EMBEDDING_PROVIDERS.includes(pm.provider)
+    );
+
+    // Add Ollama if configured via service key (it's not in aiProviders)
+    const hasOllama = serviceKeysList?.some((k) => k.service_name === "ollama_url");
+    if (hasOllama && !result.some((pm) => pm.provider === "ollama")) {
+      result.push({
+        provider: "ollama",
+        models: [
+          { id: "llama3.2", name: "llama3.2" },
+          { id: "llama3.1", name: "llama3.1" },
+          { id: "mistral", name: "mistral" },
+          { id: "gemma2", name: "gemma2" },
+          { id: "qwen2.5", name: "qwen2.5" },
+        ],
+      });
+    }
+
+    return result;
+  })();
+
+  // Internal agent model state
+  const [internalModel, setInternalModel] = useState("");
+  const [internalSaveSuccess, setInternalSaveSuccess] = useState(false);
+  const [internalSaving, setInternalSaving] = useState(false);
+
+  // Sync internal model state when config loads
+  useEffect(() => {
+    if (internalConfig) {
+      setInternalModel(`${internalConfig.provider}:${internalConfig.model}`);
+    }
+  }, [internalConfig]);
+
+  const handleInternalModelSave = async () => {
+    if (!internalModel) return;
+    const [provider, ...modelParts] = internalModel.split(":");
+    const model = modelParts.join(":");
+    if (!provider || !model) return;
+
+    setInternalSaving(true);
+    try {
+      await agents.setInternalConfig(provider, model);
+      queryClient.invalidateQueries({ queryKey: ["agents", "internal-config"] });
+      queryClient.invalidateQueries({ queryKey: ["agents", "embedding-capability"] });
+      setInternalSaveSuccess(true);
+      setTimeout(() => setInternalSaveSuccess(false), 2000);
+    } finally {
+      setInternalSaving(false);
+    }
+  };
+
+  const internalModelChanged = (() => {
+    if (!internalConfig && !internalModel) return false;
+    if (!internalConfig && internalModel) return true;
+    if (internalConfig) {
+      return internalModel !== `${internalConfig.provider}:${internalConfig.model}`;
+    }
+    return false;
+  })();
 
   const saveMutation = useMutation({
     mutationFn: async (data: {
@@ -800,12 +1021,15 @@ export function Agents() {
 
   const hasAnyModels = providerModels && providerModels.length > 0;
 
+  const analysisAgents = agentDefaults?.filter((a) => ANALYSIS_AGENTS.includes(a.agent_type)) || [];
+  const internalAgents = agentDefaults?.filter((a) => INTERNAL_AGENTS.includes(a.agent_type)) || [];
+
   return (
     <div className="space-y-6 max-w-2xl">
       <div>
         <h2 className="text-2xl font-bold">AI Agents</h2>
         <p className="text-muted-foreground">
-          Customize the AI agents used in PR analysis. Each agent specializes in a different aspect of code review.
+          Configure the AI agents used for PR analysis and codebase intelligence.
         </p>
       </div>
 
@@ -827,25 +1051,115 @@ export function Agents() {
         </Card>
       )}
 
+      {/* Analysis Agents */}
       <Card>
         <CardHeader>
           <CardTitle className="text-lg flex items-center gap-2">
             <Bot className="h-4 w-4" />
-            Agent Configuration
+            Analysis Agents
           </CardTitle>
           <CardDescription>
-            Configure model selection, enable/disable agents, and customize system prompts.
-            Models from all configured providers are available for selection.
+            These agents run during PR analysis. Each can use a different model from your configured providers.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          {agentDefaults?.map((agent) => (
+          {analysisAgents.map((agent) => (
             <AgentCard
               key={agent.agent_type}
               agent={agent}
               settings={getSettingsForAgent(agent.agent_type)}
               providerModels={providerModels || []}
-              embeddingCapability={agent.agent_type === "research" ? embeddingCapability : undefined}
+              onSave={handleSave}
+              isSaving={savingAgent === agent.agent_type}
+            />
+          ))}
+        </CardContent>
+      </Card>
+
+      {/* Internal Agents */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-lg flex items-center gap-2">
+            <Database className="h-4 w-4" />
+            Internal Agents
+          </CardTitle>
+          <CardDescription>
+            The profiler and research agents share a single model from an embedding-capable provider.
+            This model is also used to generate embeddings for semantic search.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Shared Model Picker */}
+          <div className="space-y-3 p-4 border rounded-lg bg-muted/30">
+            <div className="space-y-2">
+              <Label htmlFor="internal-model">Shared Model</Label>
+              <div className="flex gap-2">
+                <select
+                  id="internal-model"
+                  className="flex h-10 flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm"
+                  value={internalModel}
+                  onChange={(e: React.ChangeEvent<HTMLSelectElement>) => setInternalModel(e.target.value)}
+                >
+                  <option value="">Select a model...</option>
+                  {embeddingProviderModels.map((pg) => (
+                    <optgroup key={pg.provider} label={pg.provider.charAt(0).toUpperCase() + pg.provider.slice(1)}>
+                      {pg.models.map((model) => (
+                        <option key={`${pg.provider}:${model.id}`} value={`${pg.provider}:${model.id}`}>
+                          {model.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  ))}
+                </select>
+                <Button
+                  onClick={handleInternalModelSave}
+                  disabled={!internalModelChanged || internalSaving}
+                  size="sm"
+                  className="h-10"
+                >
+                  {internalSaving ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : internalSaveSuccess ? (
+                    <Check className="h-4 w-4" />
+                  ) : (
+                    "Save"
+                  )}
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Only embedding-capable providers (OpenAI, Google, Ollama) are shown.
+                Embeddings for semantic search are generated using this provider.
+              </p>
+            </div>
+
+            {embeddingCapability && (
+              <div className={cn(
+                "p-2 rounded text-xs flex items-center gap-2",
+                embeddingCapability.available
+                  ? "bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300"
+                  : "bg-orange-50 dark:bg-orange-950/30 text-orange-700 dark:text-orange-300"
+              )}>
+                {embeddingCapability.available ? (
+                  <>
+                    <Database className="h-3.5 w-3.5 flex-shrink-0" />
+                    Semantic search available via {embeddingCapability.provider}
+                  </>
+                ) : (
+                  <>
+                    <FileSearch className="h-3.5 w-3.5 flex-shrink-0" />
+                    No embedding provider configured — select a model above to enable semantic search
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Internal Agent Cards */}
+          {internalAgents.map((agent) => (
+            <InternalAgentCard
+              key={agent.agent_type}
+              agent={agent}
+              settings={getSettingsForAgent(agent.agent_type)}
               onSave={handleSave}
               isSaving={savingAgent === agent.agent_type}
             />

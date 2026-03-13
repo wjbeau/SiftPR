@@ -65,16 +65,15 @@ impl ResearchAgentTool {
         // Get research agent settings (legacy table for iterations/timeout)
         let settings = db.get_research_agent_settings(&context.user_id)?;
 
-        // Get active AI provider for fallback model
-        let (ai_settings, api_key) = db
-            .get_active_ai_setting(&context.user_id)?
-            .ok_or_else(|| AppError::NotFound("No active AI provider".to_string()))?;
-
-        // Use model override from agent_settings first, then research_agent_settings, then default
-        let model = research_setting
-            .and_then(|s| s.model_override.clone())
-            .or_else(|| settings.as_ref().and_then(|s| s.model_preference.clone()))
-            .unwrap_or_else(|| ai_settings.model_preference.clone());
+        // Use shared internal agent config first, fall back to active AI provider
+        let (provider, api_key, model) = if let Some(config) = db.get_internal_agent_config(&context.user_id)? {
+            config
+        } else {
+            let (ai_settings, key) = db
+                .get_active_ai_setting(&context.user_id)?
+                .ok_or_else(|| AppError::NotFound("No active AI provider".to_string()))?;
+            (ai_settings.provider, key, ai_settings.model_preference)
+        };
 
         // Use custom prompt from agent_settings if available
         let custom_prompt = research_setting
@@ -95,7 +94,7 @@ impl ResearchAgentTool {
             .is_some();
 
         Ok(ResearchConfig {
-            provider: ai_settings.provider,
+            provider,
             api_key,
             model,
             max_iterations,

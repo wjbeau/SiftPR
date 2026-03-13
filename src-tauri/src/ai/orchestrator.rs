@@ -60,7 +60,7 @@ fn fuzzy_match_filename<'a>(ai_name: &str, actual_names: &[&'a str]) -> Option<&
     None // Couldn't match
 }
 
-/// Configuration for a single agent
+/// Configuration for a single analysis agent
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
     pub agent_type: AgentType,

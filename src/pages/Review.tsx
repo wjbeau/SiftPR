@@ -67,7 +67,7 @@ export function Review() {
       const newComment: PendingComment = { file, line: lineStart, lineEnd, body, newLineNum, newLineNumStart };
       // Fire-and-forget save to backend
       if (owner && repo && prNumberInt) {
-        draftComments.save(owner, repo, prNumberInt, file, lineStart, lineEnd, body)
+        draftComments.save(owner, repo, prNumberInt, file, lineStart, lineEnd, body, newLineNum, newLineNumStart)
           .then((saved) => {
             setPendingComments((current) => {
               // Find the comment we just added (by reference match on body/file/line) and add the ID
@@ -175,6 +175,8 @@ export function Review() {
               line: d.line_start,
               lineEnd: d.line_end,
               body: d.body,
+              newLineNum: d.new_line_num ?? undefined,
+              newLineNumStart: d.new_line_num_start ?? undefined,
             })));
           }
         })
@@ -539,10 +541,29 @@ export function Review() {
                 {viewedFiles.size} of {displayFiles.length} files viewed
               </span>
               {pendingComments.length > 0 && (
-                <span className="text-sm text-blue-600 dark:text-blue-400 flex items-center gap-1">
-                  <MessageCircle className="h-3.5 w-3.5" />
-                  {pendingComments.length} pending comment{pendingComments.length !== 1 ? "s" : ""}
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm text-blue-600 dark:text-blue-400 flex items-center gap-1">
+                    <MessageCircle className="h-3.5 w-3.5" />
+                    {pendingComments.length} pending comment{pendingComments.length !== 1 ? "s" : ""}
+                  </span>
+                  <button
+                    onClick={() => {
+                      if (!window.confirm(`Discard ${pendingComments.length} pending comment${pendingComments.length !== 1 ? "s" : ""} and review body?`)) return;
+                      if (owner && repo && prNumberInt) {
+                        draftComments.clear(owner, repo, prNumberInt).catch((err) =>
+                          console.error("Failed to clear draft comments:", err)
+                        );
+                      }
+                      setPendingComments([]);
+                      setReviewBody("");
+                    }}
+                    className="flex items-center gap-1 text-xs text-muted-foreground hover:text-destructive border border-transparent hover:border-destructive/30 rounded px-1.5 py-0.5 transition-colors"
+                    title="Discard all pending comments"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                    Discard
+                  </button>
+                </div>
               )}
               {/* View mode toggle - only show if we've reviewed before */}
               {hasReviewedBefore && (
@@ -581,9 +602,6 @@ export function Review() {
               )}
             </div>
             <div className="flex items-center gap-2">
-              {submitError && (
-                <span className="text-xs text-destructive mr-2">{submitError}</span>
-              )}
               <Button
                 variant="outline"
                 size="sm"

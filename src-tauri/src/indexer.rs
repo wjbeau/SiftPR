@@ -136,6 +136,17 @@ pub async fn index_repository(
         });
     }
 
+    // Store total chunks to embed so the UI can show embedding progress
+    let chunks_to_embed = all_chunks.len() as u32;
+    let _ = db.update_index_progress(&index.id, files_total, files_processed, 0);
+    // Temporarily store the target in total_chunks so the frontend can compute a percentage
+    db.update_index_chunks_total(&index.id, chunks_to_embed)?;
+
+    println!(
+        "[Index] Parsed {} files -> {} chunks to embed",
+        files_processed, chunks_to_embed
+    );
+
     // Get embedding provider
     let provider = embeddings::get_provider(embedding_provider)
         .ok_or_else(|| AppError::Embedding(format!("Unknown provider: {}", embedding_provider)))?;
