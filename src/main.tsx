@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App";
 import "./index.css";
+import { logger } from "@/lib/logger";
 
 // Check if an error indicates an unauthorized/expired token
 function isUnauthorizedError(error: unknown): boolean {
@@ -36,7 +37,7 @@ const queryClient = new QueryClient({
 // Handle global errors - clears auth state on Unauthorized
 function handleUnauthorizedError(error: unknown): void {
   if (isUnauthorizedError(error)) {
-    console.log("[Auth] Unauthorized error detected, clearing auth state");
+    logger.log("[Auth] Unauthorized error detected, clearing auth state");
     // Clear auth state - this will show the login screen
     queryClient.setQueryData(["auth", "me"], null);
     // Clear localStorage caches

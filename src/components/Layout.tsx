@@ -3,6 +3,7 @@ import { Outlet, Link, useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
 import { useTheme } from "@/contexts/ThemeContext";
 import { Button } from "@/components/ui/button";
+import { logger } from "@/lib/logger";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -37,7 +38,7 @@ export function Layout() {
       setShowLogoutDialog(false);
       navigate("/login");
     }).catch((err) => {
-      console.error("Logout failed:", err);
+      logger.error("Logout failed:", err);
     });
   };
 

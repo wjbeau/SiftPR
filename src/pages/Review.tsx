@@ -4,6 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import { ArrowLeft, FileCode, Loader2, Sparkles, Calendar, MessageSquare, User, Users, GitPullRequest, RefreshCw, ClipboardList, AlertTriangle, BookOpen, Files, ChevronDown, ChevronUp, Check, CheckCircle2, XCircle, MessageCircle, Eye, EyeOff, Plus, Send, Filter, History, Pencil, Trash2, X, Shield, Layers, Paintbrush, Zap, FolderOpen, Settings, Download, FileText } from "lucide-react";
 import { github, GitHubFile, GitHubPR, GitHubReview, review, ai, analysis as analysisApi, OrchestratedAnalysis, FileAnalysis, LineAnnotation, AgentType, codebase, LinkedRepo, ReviewComment, draftComments } from "@/lib/api";
+import { logger } from "@/lib/logger";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -90,7 +91,7 @@ export function Review() {
               return current;
             });
           })
-          .catch((err) => console.error("Failed to save draft comment:", err));
+          .catch((err) => logger.error("Failed to save draft comment:", err));
       }
       return [...prev, newComment];
     });
@@ -101,7 +102,7 @@ export function Review() {
       const comment = prev[index];
       if (comment?.id) {
         draftComments.update(comment.id, newBody).catch((err) =>
-          console.error("Failed to update draft comment:", err)
+          logger.error("Failed to update draft comment:", err)
         );
       }
       return prev.map((c, i) => i === index ? { ...c, body: newBody } : c);
@@ -113,7 +114,7 @@ export function Review() {
       const comment = prev[index];
       if (comment?.id) {
         draftComments.delete(comment.id).catch((err) =>
-          console.error("Failed to delete draft comment:", err)
+          logger.error("Failed to delete draft comment:", err)
         );
       }
       return prev.filter((_, i) => i !== index);
@@ -188,7 +189,7 @@ export function Review() {
             })));
           }
         })
-        .catch((err) => console.error("Failed to load draft comments:", err));
+        .catch((err) => logger.error("Failed to load draft comments:", err));
     }
   }, [owner, repo, prNumberInt, hasLoadedDrafts]);
 
@@ -200,12 +201,12 @@ export function Review() {
       analysisApi.get(owner, repo, prNumberInt, pr.head.sha)
         .then((savedAnalysis) => {
           if (savedAnalysis) {
-            console.log("Loaded saved analysis for commit:", pr.head.sha);
+            logger.log("Loaded saved analysis for commit:", pr.head.sha);
             setAnalysis(savedAnalysis);
           }
         })
         .catch((err) => {
-          console.error("Failed to load saved analysis:", err);
+          logger.error("Failed to load saved analysis:", err);
         });
     }
   }, [pr?.head.sha, owner, repo, prNumberInt, hasLoadedAnalysis, analysis]);
@@ -227,21 +228,21 @@ export function Review() {
     setAnalysisError(null);
     try {
       const withContext = analysisMode === "with_context";
-      console.log("Starting analysis for:", prUrl, "with context:", withContext);
+      logger.log("Starting analysis for:", prUrl, "with context:", withContext);
       const result = await ai.analyzePROrchestrated(prUrl, withContext);
-      console.log("Analysis result:", result);
+      logger.log("Analysis result:", result);
       setAnalysis(result);
       setLastAnalysisMode(analysisMode);
 
       // Save analysis to cache
       try {
         await analysisApi.save(owner, repo, prNumberInt, pr.head.sha, result);
-        console.log("Analysis saved to cache");
+        logger.log("Analysis saved to cache");
       } catch (saveErr) {
-        console.error("Failed to save analysis:", saveErr);
+        logger.error("Failed to save analysis:", saveErr);
       }
     } catch (e) {
-      console.error("Analysis failed:", e);
+      logger.error("Analysis failed:", e);
       // Tauri errors come as strings or objects with message property
       const errorMsg = typeof e === "string"
         ? e
@@ -256,10 +257,10 @@ export function Review() {
   const selectedFileAnalysis = useMemo(() => {
     if (!analysis || !selectedFile) return null;
     const result = analysis.file_analyses.find(fa => fa.filename === selectedFile.filename) || null;
-    console.log("[Review] selectedFile:", selectedFile?.filename);
-    console.log("[Review] file_analyses filenames:", analysis.file_analyses.map(fa => fa.filename));
-    console.log("[Review] selectedFileAnalysis:", result);
-    console.log("[Review] selectedFileAnalysis annotations:", result?.annotations);
+    logger.log("[Review] selectedFile:", selectedFile?.filename);
+    logger.log("[Review] file_analyses filenames:", analysis.file_analyses.map(fa => fa.filename));
+    logger.log("[Review] selectedFileAnalysis:", result);
+    logger.log("[Review] selectedFileAnalysis annotations:", result?.annotations);
     return result;
   }, [analysis, selectedFile]);
 
@@ -415,19 +416,19 @@ export function Review() {
             Array.from(viewedFiles)
           );
         } catch (e) {
-          console.error("Failed to save review state:", e);
+          logger.error("Failed to save review state:", e);
         }
       }
 
       // Clear drafts from DB then clear form
       draftComments.clear(owner, repo, prNumberInt).catch((err) =>
-        console.error("Failed to clear draft comments:", err)
+        logger.error("Failed to clear draft comments:", err)
       );
       setPendingComments([]);
       setReviewBody("");
       setShowReviewDialog(false);
     } catch (e) {
-      console.error("Failed to submit review:", e);
+      logger.error("Failed to submit review:", e);
       const errorMsg = typeof e === "string"
         ? e
         : (e as { message?: string })?.message || "Failed to submit review";
@@ -565,7 +566,7 @@ export function Review() {
                       if (!window.confirm(`Discard ${pendingComments.length} pending comment${pendingComments.length !== 1 ? "s" : ""} and review body?`)) return;
                       if (owner && repo && prNumberInt) {
                         draftComments.clear(owner, repo, prNumberInt).catch((err) =>
-                          console.error("Failed to clear draft comments:", err)
+                          logger.error("Failed to clear draft comments:", err)
                         );
                       }
                       setPendingComments([]);
@@ -1215,15 +1216,15 @@ function AISummarySection({
   // Analysis complete - show summary
   if (analysis) {
     // Debug: Log all findings with their line numbers
-    console.log("[Analysis] All findings with line numbers:");
+    logger.log("[Analysis] All findings with line numbers:");
     analysis.agent_responses.forEach(r => {
       r.findings.forEach(f => {
-        console.log(`  [${r.agent_type}] ${f.file}:${f.line ?? 'NO LINE'} - ${f.message.substring(0, 50)}...`);
+        logger.log(`  [${r.agent_type}] ${f.file}:${f.line ?? 'NO LINE'} - ${f.message.substring(0, 50)}...`);
       });
     });
-    console.log("[Analysis] file_analyses count:", analysis.file_analyses.length);
+    logger.log("[Analysis] file_analyses count:", analysis.file_analyses.length);
     analysis.file_analyses.forEach(fa => {
-      console.log(`  File: ${fa.filename}, annotations: ${fa.annotations.length}, agent_findings: ${fa.agent_findings.length}`);
+      logger.log(`  File: ${fa.filename}, annotations: ${fa.annotations.length}, agent_findings: ${fa.agent_findings.length}`);
     });
     const totalFindings = analysis.agent_responses.reduce((sum, r) => sum + r.findings.length, 0);
     const criticalCount = analysis.agent_responses.reduce(
@@ -1676,7 +1677,7 @@ function AIAnalyticsPanel({ analysis, isAnalyzing, error, onRunAnalysis, linkedR
                     try {
                       await downloadMarkdown(markdown, `${repo}-pr-${pr.number}-analysis.md`);
                     } catch (err) {
-                      console.error("Failed to save markdown:", err);
+                      logger.error("Failed to save markdown:", err);
                     }
                   }}
                 >
@@ -1699,7 +1700,7 @@ function AIAnalyticsPanel({ analysis, isAnalyzing, error, onRunAnalysis, linkedR
                         `${repo}-pr-${pr.number}-analysis.html`
                       );
                     } catch (err) {
-                      console.error("Failed to save HTML:", err);
+                      logger.error("Failed to save HTML:", err);
                     }
                   }}
                 >
@@ -2622,9 +2623,9 @@ function DiffPanel({ file, owner, repo, baseSha, headSha: _headSha, onAddComment
   const effectiveAnnotations: AIAnnotation[] = useMemo(() => {
     if (aiAnnotations.length > 0) {
       // Debug logging
-      console.log("[DiffPanel] aiAnnotations received:", aiAnnotations);
-      console.log("[DiffPanel] lineNumToRowIndex size:", lineNumToRowIndex.size);
-      console.log("[DiffPanel] lineNumToRowIndex entries (first 20):",
+      logger.log("[DiffPanel] aiAnnotations received:", aiAnnotations);
+      logger.log("[DiffPanel] lineNumToRowIndex size:", lineNumToRowIndex.size);
+      logger.log("[DiffPanel] lineNumToRowIndex entries (first 20):",
         Array.from(lineNumToRowIndex.entries()).slice(0, 20));
 
       // Convert LineAnnotation to AIAnnotation format for display
@@ -2636,7 +2637,7 @@ function DiffPanel({ file, owner, repo, baseSha, headSha: _headSha, onAddComment
           const fromMap = lineNumToRowIndex.get(a.line_number);
           const fromClosest = findClosestRow(a.line_number);
           rowIndex = fromMap ?? fromClosest ?? -1;
-          console.log(`[DiffPanel] Mapping annotation line ${a.line_number}: fromMap=${fromMap}, fromClosest=${fromClosest}, final=${rowIndex}`);
+          logger.log(`[DiffPanel] Mapping annotation line ${a.line_number}: fromMap=${fromMap}, fromClosest=${fromClosest}, final=${rowIndex}`);
         }
         return {
           lineIndex: rowIndex,
@@ -2649,7 +2650,7 @@ function DiffPanel({ file, owner, repo, baseSha, headSha: _headSha, onAddComment
         };
       });
       const filtered = mapped.filter(a => a.lineIndex >= 0);
-      console.log("[DiffPanel] effectiveAnnotations after filter:", filtered);
+      logger.log("[DiffPanel] effectiveAnnotations after filter:", filtered);
       return filtered;
     }
     if (!file) return [];

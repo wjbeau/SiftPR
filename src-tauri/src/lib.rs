@@ -4,10 +4,12 @@ mod crypto;
 mod db;
 mod error;
 mod github;
+mod helpers;
 mod indexer;
 mod parser;
 
 use std::sync::Mutex;
+use tracing::{debug, error, info, warn};
 use tauri::State;
 
 use ai::{AIClient, MCPManager, MCPTool, ModelInfo, OrchestratedAnalysis, Orchestrator, prompts, types::AgentType, orchestrator::{AgentConfig, ToolConfig}, tools::ToolExecutionConfig};
@@ -142,7 +144,7 @@ async fn auth_get_user(state: State<'_, Mutex<AppState>>) -> AppResult<Option<Us
         Err(e) => {
             // Other errors (network, etc) - don't clear token, just report error
             // The user might still have a valid token but we can't verify
-            println!("[Auth] Error validating token: {}", e);
+            warn!("[Auth] Error validating token: {}", e);
             Err(e)
         }
     }
@@ -167,9 +169,9 @@ fn auth_logout(keep_data: bool, state: State<'_, Mutex<AppState>>) -> AppResult<
 fn settings_get_ai_providers(
     state: State<'_, Mutex<AppState>>,
 ) -> AppResult<Vec<AISettings>> {
-    let app = state.lock().unwrap();
-    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
-    app.db.get_ai_settings(&user.id)
+    helpers::with_user_id(&state, |db, user_id| {
+        db.get_ai_settings(user_id)
+    })
 }
 
 #[tauri::command]
@@ -202,9 +204,9 @@ fn settings_activate_ai_provider(
     setting_id: String,
     state: State<'_, Mutex<AppState>>,
 ) -> AppResult<()> {
-    let app = state.lock().unwrap();
-    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
-    app.db.activate_ai_setting(&user.id, &setting_id)
+    helpers::with_user_id(&state, |db, user_id| {
+        db.activate_ai_setting(user_id, &setting_id)
+    })
 }
 
 #[tauri::command]
@@ -212,9 +214,9 @@ fn settings_delete_ai_provider(
     setting_id: String,
     state: State<'_, Mutex<AppState>>,
 ) -> AppResult<()> {
-    let app = state.lock().unwrap();
-    let user = app.db.get_current_user()?.ok_or(AppError::Unauthorized)?;
-    app.db.delete_ai_setting(&user.id, &setting_id)
+    helpers::with_user_id(&state, |db, user_id| {
+        db.delete_ai_setting(user_id, &setting_id)
+    })
 }
 
 #[tauri::command]
@@ -768,7 +770,7 @@ async fn codebase_analyze(
     };
 
     if let Some((provider, api_key, model, custom_prompt)) = ai_config {
-        println!("[Analyze] Running AI profiler for {} with {}/{}", repo_full_name, provider, model);
+        info!("[Analyze] Running AI profiler for {} with {}/{}", repo_full_name, provider, model);
 
         let context_summary = codebase::generate_context_summary(&profile);
         let system_prompt = custom_prompt
@@ -779,17 +781,17 @@ async fn codebase_analyze(
         let client = ai::AIClient::new();
         match client.call_with_system(&provider, &api_key, &model, system_prompt, &user_prompt).await {
             Ok(summary) => {
-                println!("[Analyze] AI profiler complete ({} chars)", summary.len());
+                debug!("[Analyze] AI profiler complete ({} chars)", summary.len());
                 let app = state.lock().unwrap();
                 let _ = app.db.update_repo_ai_summary(&user_id, &repo_full_name, &summary);
             }
             Err(e) => {
                 // Don't fail the whole analyze — the filesystem profile is still valuable
-                println!("[Analyze] AI profiler failed (non-fatal): {}", e);
+                warn!("[Analyze] AI profiler failed (non-fatal): {}", e);
             }
         }
     } else {
-        println!("[Analyze] No AI provider configured, skipping profiler agent");
+        debug!("[Analyze] No AI provider configured, skipping profiler agent");
     }
 
     Ok(profile)
@@ -937,7 +939,7 @@ async fn codebase_index_start(
             let db = match db::Database::new() {
                 Ok(db) => db,
                 Err(e) => {
-                    println!("[Index] Failed to open database: {}", e);
+                    error!("[Index] Failed to open database: {}", e);
                     return;
                 }
             };
@@ -953,7 +955,7 @@ async fn codebase_index_start(
             ).await;
 
             if let Err(ref e) = result {
-                println!("[Index] Indexing failed: {}", e);
+                error!("[Index] Indexing failed: {}", e);
                 if let Ok(Some(index)) = db.get_codebase_index(&user_id, &repo_full_name) {
                     let _ = db.update_index_status(
                         &index.id,
@@ -962,11 +964,11 @@ async fn codebase_index_start(
                     );
                 }
             } else {
-                println!("[Index] Indexing completed successfully for {}", repo_full_name);
+                info!("[Index] Indexing completed successfully for {}", repo_full_name);
             }
         });
     } else {
-        println!("[Index] No embedding provider configured, skipping semantic indexing");
+        debug!("[Index] No embedding provider configured, skipping semantic indexing");
     }
 
     Ok(())
@@ -1505,13 +1507,13 @@ pub fn run() {
                 // Handle deep links received while app is running
                 app.deep_link().on_open_url(move |event| {
                     for url in event.urls() {
-                        println!("Deep link received: {}", url);
+                        debug!("Deep link received: {}", url);
                         // Parse the OAuth callback URL to extract the code
                         if let Some(code) = url.query_pairs()
                             .find(|(key, _)| key == "code")
                             .map(|(_, value)| value.to_string())
                         {
-                            println!("OAuth code: {}", code);
+                            debug!("OAuth code extracted");
                             // Emit to frontend
                             let _ = handle.emit("oauth-callback", code);
                         }

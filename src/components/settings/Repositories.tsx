@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { open } from "@tauri-apps/plugin-dialog";
 import { agents, codebase, github, indexing, CodebaseIndexStatus } from "@/lib/api";
+import { logger } from "@/lib/logger";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -136,7 +137,7 @@ export function Repositories() {
       // Don't clear indexingRepo here; let polling detect completion
     },
     onError: (error) => {
-      console.error("Indexing failed:", error);
+      logger.error("Indexing failed:", error);
       const msg = typeof error === "string" ? error : (error as Error)?.message || JSON.stringify(error);
       setIndexError(msg);
       setIndexingRepo(null);

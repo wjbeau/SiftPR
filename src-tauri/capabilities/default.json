@@ -1,7 +1,7 @@
 {
   "$schema": "https://schemas.tauri.app/config/2/capability",
   "identifier": "default",
-  "description": "Default capabilities for ReviewBoss",
+  "description": "Default capabilities for SiftPR",
   "windows": ["main"],
   "permissions": [
     "core:default",

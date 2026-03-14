@@ -1,8 +1,8 @@
-# Claude Code Instructions for ReviewBoss
+# Claude Code Instructions for SiftPR
 
 ## Project Overview
 
-ReviewBoss is an AI-powered desktop PR review tool built with Tauri. It helps developers review pull requests more efficiently by using AI to organize and analyze PR changes, highlighting important changes and suggesting review order.
+SiftPR is an AI-powered desktop PR review tool built with Tauri. It helps developers review pull requests more efficiently by using AI to organize and analyze PR changes, highlighting important changes and suggesting review order.
 
 ## Tech Stack
 
@@ -14,7 +14,7 @@ ReviewBoss is an AI-powered desktop PR review tool built with Tauri. It helps de
 ## Project Structure
 
 ```
-ReviewBoss/
+SiftPR/
 ├── src/                    # React frontend
 │   ├── components/         # UI components
 │   ├── contexts/           # React contexts (auth)
@@ -129,7 +129,7 @@ Commands are defined in `src-tauri/src/lib.rs` and invoked from frontend via `@t
 ## GitHub OAuth Setup
 
 1. Create GitHub OAuth App at https://github.com/settings/developers
-2. Set callback URL to `reviewboss://oauth/callback`
+2. Set callback URL to `siftpr://oauth/callback`
 3. Update client ID/secret in `src-tauri/src/github.rs`
 
 ## Building for Production

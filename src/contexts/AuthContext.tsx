@@ -2,6 +2,7 @@ import { createContext, useContext, ReactNode, useEffect } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { listen } from "@tauri-apps/api/event";
 import { auth, User } from "@/lib/api";
+import { logger } from "@/lib/logger";
 
 interface AuthContextType {
   user: User | null;
@@ -26,12 +27,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // Listen for OAuth callback from deep link
   useEffect(() => {
     const unlisten = listen<string>("oauth-callback", async (event) => {
-      console.log("OAuth callback received:", event.payload);
+      logger.log("OAuth callback received:", event.payload);
       try {
         const user = await auth.exchangeCode(event.payload);
         queryClient.setQueryData(["auth", "me"], user);
       } catch (error) {
-        console.error("Failed to exchange OAuth code:", error);
+        logger.error("Failed to exchange OAuth code:", error);
       }
     });
 

@@ -5,6 +5,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { auth } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { logger } from "@/lib/logger";
 import {
   Card,
   CardContent,
@@ -35,7 +36,7 @@ export function Login() {
       await open(url);
       // The deep link handler will complete the OAuth flow
     } catch (error) {
-      console.error("Failed to start OAuth:", error);
+      logger.error("Failed to start OAuth:", error);
       setError("Failed to open browser");
       setIsSigningIn(false);
     }
@@ -49,7 +50,7 @@ export function Login() {
       await auth.exchangeCode(manualCode.trim());
       refetch();
     } catch (error) {
-      console.error("Failed to exchange code:", error);
+      logger.error("Failed to exchange code:", error);
       setError("Failed to exchange code. It may have expired.");
       setIsExchanging(false);
     }

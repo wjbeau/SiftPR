@@ -62,7 +62,7 @@ impl MCPManager {
                     "roots": { "listChanged": false }
                 },
                 "clientInfo": {
-                    "name": "ReviewBoss",
+                    "name": "SiftPR",
                     "version": env!("CARGO_PKG_VERSION")
                 }
             })),
@@ -297,7 +297,7 @@ impl MCPManager {
                     "roots": { "listChanged": false }
                 },
                 "clientInfo": {
-                    "name": "ReviewBoss",
+                    "name": "SiftPR",
                     "version": env!("CARGO_PKG_VERSION")
                 }
             })),

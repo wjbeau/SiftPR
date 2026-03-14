@@ -45,7 +45,7 @@ Note this thing has been vibe coded to the max, with little or no attention paid
 ## Project Structure
 
 ```
-ReviewBoss/
+SiftPR/
 ├── src/                    # React frontend
 │   ├── components/         # UI components
 │   ├── contexts/           # React contexts
