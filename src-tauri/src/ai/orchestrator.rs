@@ -7,6 +7,7 @@ use crate::error::{AppError, AppResult};
 use crate::github::GitHubFile;
 
 use super::client::AIClient;
+use super::pipeline::{AgentContext, AgentPipeline, PipelineRegistry, RepoContext};
 use super::prompts::{build_agent_prompt, build_files_context, build_grouping_prompt, get_system_prompt};
 use super::tools::{ToolContext, ToolExecutionConfig, ToolExecutor};
 use super::types::{
@@ -102,12 +103,36 @@ pub struct ToolConfig {
 
 pub struct Orchestrator {
     client: AIClient,
+    pipeline_registry: PipelineRegistry,
 }
 
 impl Orchestrator {
     pub fn new() -> Self {
         Self {
             client: AIClient::new(),
+            pipeline_registry: PipelineRegistry::new(),
+        }
+    }
+
+    /// Build RepoContext from ToolConfig for pipeline usage
+    fn build_repo_context(
+        tool_config: Option<&ToolConfig>,
+        has_embeddings: bool,
+        index_id: Option<i64>,
+    ) -> RepoContext {
+        match tool_config {
+            Some(tc) => RepoContext {
+                index_id,
+                repo_path: tc.repo_path.clone(),
+                repo_full_name: tc.repo_full_name.clone(),
+                has_embeddings,
+                tool_context: Some(ToolContext {
+                    repo_path: tc.repo_path.clone(),
+                    repo_full_name: tc.repo_full_name.clone(),
+                    user_id: tc.user_id.clone(),
+                }),
+            },
+            None => RepoContext::empty(),
         }
     }
 
@@ -152,55 +177,120 @@ impl Orchestrator {
 
         let tool_config_ref = tool_config.as_ref();
 
+        // Determine if we should use pipeline-based context retrieval
+        // Use pipelines when:
+        // 1. Codebase context is requested (with_codebase_context mode)
+        // 2. We have a linked repository (repo_path is available)
+        let use_pipelines = codebase_context.is_some()
+            && tool_config_ref.map(|tc| tc.repo_path.is_some()).unwrap_or(false);
+
+        // Build RepoContext for pipeline usage
+        // TODO: Pass index_id and has_embeddings from caller when available
+        let repo_context = Self::build_repo_context(tool_config_ref, false, None);
+
         // Run enabled agents in parallel
         // Note: The research agent is available as a tool (spawn_research_agent) that
         // any analysis agent can call on demand to investigate the codebase.
-        let (security_result, architecture_result, style_result, performance_result) = tokio::join!(
-            self.run_agent_if_enabled(
-                &security_config,
-                provider,
-                api_key,
-                default_model,
-                pr_title,
-                pr_body,
-                &files_context,
-                codebase_context,
-                tool_config_ref,
-            ),
-            self.run_agent_if_enabled(
-                &architecture_config,
-                provider,
-                api_key,
-                default_model,
-                pr_title,
-                pr_body,
-                &files_context,
-                codebase_context,
-                tool_config_ref,
-            ),
-            self.run_agent_if_enabled(
-                &style_config,
-                provider,
-                api_key,
-                default_model,
-                pr_title,
-                pr_body,
-                &files_context,
-                codebase_context,
-                tool_config_ref,
-            ),
-            self.run_agent_if_enabled(
-                &performance_config,
-                provider,
-                api_key,
-                default_model,
-                pr_title,
-                pr_body,
-                &files_context,
-                codebase_context,
-                tool_config_ref,
-            ),
-        );
+        let (security_result, architecture_result, style_result, performance_result) = if use_pipelines {
+            println!("[AI] Using pipeline-based context retrieval for enhanced analysis");
+            tokio::join!(
+                self.run_agent_if_enabled_with_pipeline(
+                    &security_config,
+                    provider,
+                    api_key,
+                    default_model,
+                    pr_title,
+                    pr_body,
+                    files,
+                    &files_context,
+                    codebase_context,
+                    &repo_context,
+                ),
+                self.run_agent_if_enabled_with_pipeline(
+                    &architecture_config,
+                    provider,
+                    api_key,
+                    default_model,
+                    pr_title,
+                    pr_body,
+                    files,
+                    &files_context,
+                    codebase_context,
+                    &repo_context,
+                ),
+                self.run_agent_if_enabled_with_pipeline(
+                    &style_config,
+                    provider,
+                    api_key,
+                    default_model,
+                    pr_title,
+                    pr_body,
+                    files,
+                    &files_context,
+                    codebase_context,
+                    &repo_context,
+                ),
+                self.run_agent_if_enabled_with_pipeline(
+                    &performance_config,
+                    provider,
+                    api_key,
+                    default_model,
+                    pr_title,
+                    pr_body,
+                    files,
+                    &files_context,
+                    codebase_context,
+                    &repo_context,
+                ),
+            )
+        } else {
+            tokio::join!(
+                self.run_agent_if_enabled(
+                    &security_config,
+                    provider,
+                    api_key,
+                    default_model,
+                    pr_title,
+                    pr_body,
+                    &files_context,
+                    codebase_context,
+                    tool_config_ref,
+                ),
+                self.run_agent_if_enabled(
+                    &architecture_config,
+                    provider,
+                    api_key,
+                    default_model,
+                    pr_title,
+                    pr_body,
+                    &files_context,
+                    codebase_context,
+                    tool_config_ref,
+                ),
+                self.run_agent_if_enabled(
+                    &style_config,
+                    provider,
+                    api_key,
+                    default_model,
+                    pr_title,
+                    pr_body,
+                    &files_context,
+                    codebase_context,
+                    tool_config_ref,
+                ),
+                self.run_agent_if_enabled(
+                    &performance_config,
+                    provider,
+                    api_key,
+                    default_model,
+                    pr_title,
+                    pr_body,
+                    &files_context,
+                    codebase_context,
+                    tool_config_ref,
+                ),
+            )
+        };
 
         // Collect successful responses and failures
         let mut agent_responses: Vec<AgentResponse> = Vec::new();
@@ -524,6 +614,140 @@ impl Orchestrator {
                 total_tokens: estimated_prompt_tokens + estimated_completion_tokens,
             }),
         })
+    }
+
+    /// Run an agent using the pipeline architecture for enhanced context retrieval
+    ///
+    /// This method uses agent-specific pipelines to:
+    /// 1. Retrieve relevant code examples from the codebase
+    /// 2. Build enhanced prompts with context
+    /// 3. Execute the agent with the enhanced context
+    async fn run_agent_with_pipeline(
+        &self,
+        agent_type: AgentType,
+        provider: &str,
+        api_key: &str,
+        model: &str,
+        pr_title: &str,
+        pr_body: Option<&str>,
+        files: &[GitHubFile],
+        files_context: &str,
+        codebase_summary: Option<&str>,
+        repo_context: &RepoContext,
+    ) -> AppResult<AgentResponse> {
+        let start_time = Instant::now();
+
+        // Get the pipeline for this agent type
+        let pipeline = self.pipeline_registry.get(agent_type).ok_or_else(|| {
+            AppError::Internal(format!("No pipeline found for agent type: {:?}", agent_type))
+        })?;
+
+        // Retrieve agent-specific context
+        let mut agent_context = pipeline.retrieve_context(files, repo_context).await?;
+
+        // Add the codebase summary if available
+        agent_context.codebase_summary = codebase_summary.map(String::from);
+
+        let context_tokens = agent_context.estimated_tokens();
+        println!(
+            "[AI] {} agent retrieved context: {} similar code examples, {} patterns (~{} tokens)",
+            agent_type.as_str(),
+            agent_context.similar_code.len(),
+            agent_context.pattern_examples.len(),
+            context_tokens
+        );
+
+        // Build prompts using the pipeline
+        let system_prompt = pipeline.build_system_prompt(&agent_context);
+        let user_prompt = pipeline.build_user_prompt(pr_title, pr_body, files_context, &agent_context);
+
+        // Execute the agent
+        let result = timeout(
+            Duration::from_secs(AGENT_TIMEOUT_SECS),
+            self.client.call_with_system(provider, api_key, model, &system_prompt, &user_prompt),
+        )
+        .await
+        .map_err(|_| AppError::AIProvider(format!("{} agent timed out", agent_type.as_str())))?;
+
+        let response_text = result?;
+        let processing_time_ms = start_time.elapsed().as_millis() as u64;
+
+        // Estimate token usage
+        let prompt_chars = system_prompt.len() + user_prompt.len();
+        let response_chars = response_text.len();
+        let estimated_prompt_tokens = (prompt_chars / 4) as u32;
+        let estimated_completion_tokens = (response_chars / 4) as u32;
+
+        println!(
+            "[AI] {} agent (with pipeline) completed in {}ms (~{} prompt + ~{} completion tokens)",
+            agent_type.as_str(),
+            processing_time_ms,
+            estimated_prompt_tokens,
+            estimated_completion_tokens
+        );
+
+        println!(
+            "[AI] {} agent raw response (first 500 chars): {}",
+            agent_type.as_str(),
+            &response_text.chars().take(500).collect::<String>()
+        );
+
+        // Parse the response
+        let raw_response = parse_agent_response(&response_text).map_err(|e| {
+            println!("[AI] {} agent parse error: {}", agent_type.as_str(), e);
+            e
+        })?;
+
+        // Post-process using the pipeline
+        let response = pipeline.post_process(raw_response, processing_time_ms);
+
+        // Add token usage
+        Ok(AgentResponse {
+            token_usage: Some(TokenUsage {
+                prompt_tokens: estimated_prompt_tokens,
+                completion_tokens: estimated_completion_tokens,
+                total_tokens: estimated_prompt_tokens + estimated_completion_tokens,
+            }),
+            ..response
+        })
+    }
+
+    /// Run an agent with pipeline context retrieval and optional tool support
+    async fn run_agent_if_enabled_with_pipeline(
+        &self,
+        config: &AgentConfig,
+        provider: &str,
+        api_key: &str,
+        default_model: &str,
+        pr_title: &str,
+        pr_body: Option<&str>,
+        files: &[GitHubFile],
+        files_context: &str,
+        codebase_summary: Option<&str>,
+        repo_context: &RepoContext,
+    ) -> Option<AppResult<AgentResponse>> {
+        if !config.enabled {
+            return None;
+        }
+
+        let model = config.model_override.as_deref().unwrap_or(default_model);
+
+        // Use pipeline-based execution
+        Some(
+            self.run_agent_with_pipeline(
+                config.agent_type,
+                provider,
+                api_key,
+                model,
+                pr_title,
+                pr_body,
+                files,
+                files_context,
+                codebase_summary,
+                repo_context,
+            )
+            .await,
+        )
     }
 
     async fn run_file_grouping(

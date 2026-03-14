@@ -2,6 +2,7 @@ pub mod client;
 pub mod embeddings;
 pub mod mcp;
 pub mod orchestrator;
+pub mod pipeline;
 pub mod prompts;
 pub mod tools;
 pub mod types;
@@ -10,6 +11,9 @@ pub mod types;
 pub use client::{AIClient, ModelInfo, PRAnalysis, PRCategory, KeyChange};
 pub use mcp::{MCPManager, MCPTool};
 pub use orchestrator::{AgentConfig, Orchestrator, ToolConfig};
+pub use pipeline::{
+    AgentContext, AgentExecutionConfig, AgentPipeline, CodeExample, PipelineRegistry, RepoContext,
+};
 pub use tools::{ToolContext, ToolDefinition, ToolExecutionConfig, ToolExecutor};
 pub use types::{
     AgentFinding, AgentResponse, AgentSummary, AgentType, AnnotationType, FailedAgent,
