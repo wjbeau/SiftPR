@@ -529,7 +529,7 @@ async fn ai_analyze_pr_orchestrated(
                 enabled: setting.map(|s| s.enabled).unwrap_or(true),
                 model_override: setting.and_then(|s| s.model_override.clone()),
                 custom_prompt: setting.and_then(|s| s.custom_prompt.clone()),
-                use_tools: linked_path.is_some(),
+                use_tools: with_codebase_context.unwrap_or(false) && linked_path.is_some(),
             }
         }).collect();
 

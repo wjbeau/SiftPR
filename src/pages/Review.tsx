@@ -248,6 +248,9 @@ export function Review() {
         ? e
         : (e as { message?: string })?.message || JSON.stringify(e);
       setAnalysisError(errorMsg);
+      // Clear stale analysis so the error is visible to the user
+      // (the UI only shows errors when analysis is null)
+      setAnalysis(null);
     } finally {
       setIsAnalyzing(false);
     }
