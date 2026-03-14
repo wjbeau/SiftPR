@@ -115,10 +115,37 @@ async fn get_valid_token(state: &State<'_, Mutex<AppState>>) -> AppResult<(Strin
     Ok((access_token, user_id))
 }
 
+/// Check if the user's token is valid (not expired or can be refreshed)
+/// Returns the user if valid, None if no user or token is invalid/expired
 #[tauri::command]
-fn auth_get_user(state: State<'_, Mutex<AppState>>) -> AppResult<Option<User>> {
-    let app = state.lock().unwrap();
-    app.db.get_current_user()
+async fn auth_get_user(state: State<'_, Mutex<AppState>>) -> AppResult<Option<User>> {
+    // First check if we have a user at all
+    let user = {
+        let app = state.lock().unwrap();
+        app.db.get_current_user()?
+    };
+
+    let user = match user {
+        Some(u) => u,
+        None => return Ok(None),
+    };
+
+    // Check if token is valid (will attempt refresh if expired)
+    match get_valid_token(&state).await {
+        Ok(_) => Ok(Some(user)),
+        Err(AppError::Unauthorized) => {
+            // Token is expired and couldn't be refreshed - clear token but keep user data
+            let app = state.lock().unwrap();
+            let _ = app.db.clear_user_token(&user.id);
+            Ok(None)
+        }
+        Err(e) => {
+            // Other errors (network, etc) - don't clear token, just report error
+            // The user might still have a valid token but we can't verify
+            println!("[Auth] Error validating token: {}", e);
+            Err(e)
+        }
+    }
 }
 
 #[tauri::command]
@@ -1398,6 +1425,7 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_fs::init())
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             auth_get_oauth_url,

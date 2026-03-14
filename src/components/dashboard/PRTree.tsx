@@ -1,6 +1,6 @@
 import { useState, useMemo, useEffect } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { ChevronRight, GitBranch, User, Loader2, RefreshCw, CheckCircle2, XCircle, MessageSquare } from "lucide-react";
+import { ChevronRight, GitBranch, User, Loader2, RefreshCw, CheckCircle2, XCircle } from "lucide-react";
 import { github } from "@/lib/api";
 import type { GitHubRepo, GitHubPR, GitHubReview } from "@/lib/api";
 import { cn, formatDistanceToNow } from "@/lib/utils";

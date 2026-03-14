@@ -2,13 +2,20 @@ import { useState, useMemo, useCallback, useEffect, useRef } from "react";
 import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
-import { ArrowLeft, FileCode, Loader2, Sparkles, Calendar, MessageSquare, User, Users, GitPullRequest, RefreshCw, ClipboardList, AlertTriangle, BookOpen, Files, ChevronDown, ChevronUp, Check, CheckCircle2, XCircle, MessageCircle, Eye, EyeOff, Plus, Send, Filter, History, Pencil, Trash2, X, Shield, Layers, Paintbrush, Zap, FolderOpen, Settings } from "lucide-react";
+import { ArrowLeft, FileCode, Loader2, Sparkles, Calendar, MessageSquare, User, Users, GitPullRequest, RefreshCw, ClipboardList, AlertTriangle, BookOpen, Files, ChevronDown, ChevronUp, Check, CheckCircle2, XCircle, MessageCircle, Eye, EyeOff, Plus, Send, Filter, History, Pencil, Trash2, X, Shield, Layers, Paintbrush, Zap, FolderOpen, Settings, Download, FileText } from "lucide-react";
 import { github, GitHubFile, GitHubPR, GitHubReview, review, ai, analysis as analysisApi, OrchestratedAnalysis, FileAnalysis, LineAnnotation, AgentType, codebase, LinkedRepo, ReviewComment, draftComments } from "@/lib/api";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn, formatDistanceToNow } from "@/lib/utils";
 import { CommentToolbar } from "@/components/CommentToolbar";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { formatAnalysisAsMarkdown, downloadMarkdown, downloadAsHTML } from "@/lib/exportAnalysis";
 
 type ViewMode = "all" | "since_review";
 
@@ -514,6 +521,9 @@ export function Review() {
                 analysisMode={analysisMode}
                 onSetAnalysisMode={setAnalysisMode}
                 lastAnalysisMode={lastAnalysisMode}
+                pr={pr}
+                owner={owner}
+                repo={repo}
               />
             </div>
           ) : (
@@ -1396,9 +1406,12 @@ interface AIAnalyticsPanelProps {
   analysisMode: "pr_only" | "with_context";
   onSetAnalysisMode: (mode: "pr_only" | "with_context") => void;
   lastAnalysisMode: "pr_only" | "with_context" | null;
+  pr: GitHubPR | undefined;
+  owner: string | undefined;
+  repo: string | undefined;
 }
 
-function AIAnalyticsPanel({ analysis, isAnalyzing, error, onRunAnalysis, linkedRepo, analysisMode, onSetAnalysisMode, lastAnalysisMode }: AIAnalyticsPanelProps) {
+function AIAnalyticsPanel({ analysis, isAnalyzing, error, onRunAnalysis, linkedRepo, analysisMode, onSetAnalysisMode, lastAnalysisMode, pr, owner, repo }: AIAnalyticsPanelProps) {
   const [expandedAgents, setExpandedAgents] = useState<Set<AgentType>>(new Set());
 
   const toggleAgent = (agentType: AgentType) => {
@@ -1642,6 +1655,60 @@ function AIAnalyticsPanel({ analysis, isAnalyzing, error, onRunAnalysis, linkedR
             <RefreshCw className="h-3.5 w-3.5" />
             Re-analyze
           </Button>
+          {pr && owner && repo && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" size="sm" className="gap-1.5">
+                  <Download className="h-3.5 w-3.5" />
+                  Export
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuItem
+                  onClick={async () => {
+                    const markdown = formatAnalysisAsMarkdown(
+                      analysis,
+                      pr,
+                      owner,
+                      repo,
+                      lastAnalysisMode || undefined
+                    );
+                    try {
+                      await downloadMarkdown(markdown, `${repo}-pr-${pr.number}-analysis.md`);
+                    } catch (err) {
+                      console.error("Failed to save markdown:", err);
+                    }
+                  }}
+                >
+                  <FileText className="h-4 w-4 mr-2" />
+                  Download Markdown
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  onClick={async () => {
+                    const markdown = formatAnalysisAsMarkdown(
+                      analysis,
+                      pr,
+                      owner,
+                      repo,
+                      lastAnalysisMode || undefined
+                    );
+                    try {
+                      await downloadAsHTML(
+                        markdown,
+                        `PR Analysis - ${repo} #${pr.number}`,
+                        `${repo}-pr-${pr.number}-analysis.html`
+                      );
+                    } catch (err) {
+                      console.error("Failed to save HTML:", err);
+                    }
+                  }}
+                >
+                  <FileCode className="h-4 w-4 mr-2" />
+                  Download HTML
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </div>
       </div>
 
