@@ -14,6 +14,7 @@ use crate::parser::{self, CodeChunk};
 
 /// Result of an indexing operation
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct IndexingResult {
     pub chunks_indexed: usize,
     pub files_processed: usize,
@@ -321,6 +322,7 @@ pub fn semantic_search(
 }
 
 /// Find chunks similar to a given code snippet
+#[allow(dead_code)]
 pub async fn find_similar_code(
     db: &Database,
     index_id: &str,
@@ -347,6 +349,7 @@ pub async fn find_similar_code(
 }
 
 /// Get all usages of an abstraction (class, interface, trait)
+#[allow(dead_code)]
 pub fn get_abstraction_usages(
     db: &Database,
     index_id: &str,

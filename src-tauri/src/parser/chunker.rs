@@ -1,7 +1,7 @@
 //! Code chunk extraction using Tree-sitter AST parsing
 
 use std::path::Path;
-use tree_sitter::{Parser, Node, Query, QueryCursor};
+use tree_sitter::{Parser, Node};
 
 use super::{CodeChunk, Language, languages};
 use crate::db::ChunkType;

@@ -8,18 +8,23 @@ mod helpers;
 mod indexer;
 mod parser;
 
+use std::collections::HashMap;
 use std::sync::Mutex;
 use tracing::{debug, error, info, warn};
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
+use tokio_util::sync::CancellationToken;
 
 use ai::{AIClient, MCPManager, MCPTool, ModelInfo, OrchestratedAnalysis, Orchestrator, prompts, types::AgentType, orchestrator::{AgentConfig, ToolConfig}, tools::ToolExecutionConfig};
+use ai::events::{AnalysisEvent, ANALYSIS_PROGRESS_EVENT};
 use db::{AISettings, AgentSettings, CodebaseProfile, Database, DraftComment, LinkedRepo, PRReviewState, User, UserRepo};
 use error::{AppError, AppResult};
-use github::{GitHubClient, GitHubFile, GitHubPR, GitHubRepo, GitHubReview, OAuthTokens};
+use github::{GitHubClient, GitHubFile, GitHubPR, GitHubRepo, GitHubReview};
 
 /// Application state - only holds database, clients are created as needed
 pub struct AppState {
     pub db: Database,
+    /// Active analysis cancellation tokens, keyed by PR URL
+    pub cancel_tokens: HashMap<String, CancellationToken>,
 }
 
 // Auth commands
@@ -482,11 +487,22 @@ async fn ai_analyze_pr(
 async fn ai_analyze_pr_orchestrated(
     url: String,
     with_codebase_context: Option<bool>,
+    app_handle: AppHandle,
     state: State<'_, Mutex<AppState>>,
 ) -> AppResult<OrchestratedAnalysis> {
     let (owner, repo, pr_number) = github::parse_pr_url(&url)?;
     let repo_full_name = format!("{}/{}", owner, repo);
     let (token, _) = get_valid_token(&state).await?;
+
+    // Create cancellation token and store it
+    let cancel_token = CancellationToken::new();
+    {
+        let mut app = state.lock().unwrap();
+        app.cancel_tokens.insert(url.clone(), cancel_token.clone());
+    }
+
+    // Emit analysis started event
+    let _ = app_handle.emit(ANALYSIS_PROGRESS_EVENT, AnalysisEvent::AnalysisStarted { agent_count: 4 });
 
     // Get AI settings, and agent settings from DB (short lock)
     let (provider, api_key, model, codebase_context, agent_configs, user_id, linked_repo_path) = {
@@ -536,6 +552,13 @@ async fn ai_analyze_pr_orchestrated(
         (settings.provider, key, settings.model_preference, context, configs, user.id, linked_path)
     };
 
+    // Check cancellation
+    if cancel_token.is_cancelled() {
+        let _ = app_handle.emit(ANALYSIS_PROGRESS_EVENT, AnalysisEvent::AnalysisCancelled);
+        cleanup_cancel_token(&state, &url);
+        return Err(AppError::AIProvider("Analysis cancelled".to_string()));
+    }
+
     // Get PR details (no lock held)
     let github_client = GitHubClient::new();
     let pr = github_client.get_pr(&token, &owner, &repo, pr_number).await?;
@@ -549,9 +572,15 @@ async fn ai_analyze_pr_orchestrated(
         execution_config: ToolExecutionConfig::default(),
     });
 
+    // Create event emitter closure
+    let app_handle_clone = app_handle.clone();
+    let event_emitter = move |event: AnalysisEvent| {
+        let _ = app_handle_clone.emit(ANALYSIS_PROGRESS_EVENT, event);
+    };
+
     // Run orchestrated analysis with all agents (no lock held)
     let orchestrator = Orchestrator::new();
-    orchestrator.analyze_pr(
+    let result = orchestrator.analyze_pr_with_events(
         &provider,
         &api_key,
         &model,
@@ -561,7 +590,42 @@ async fn ai_analyze_pr_orchestrated(
         codebase_context.as_deref(),
         Some(agent_configs),
         tool_config,
-    ).await
+        Some(std::sync::Arc::new(event_emitter)),
+        Some(cancel_token),
+    ).await;
+
+    // Clean up cancel token
+    cleanup_cancel_token(&state, &url);
+
+    match &result {
+        Ok(_) => {
+            let _ = app_handle.emit(ANALYSIS_PROGRESS_EVENT, AnalysisEvent::AnalysisCompleted {
+                total_time_ms: 0, // Will be set from the result
+            });
+        }
+        Err(_) => {}
+    }
+
+    result
+}
+
+#[tauri::command]
+async fn ai_cancel_analysis(
+    url: String,
+    state: State<'_, Mutex<AppState>>,
+) -> AppResult<()> {
+    let mut app = state.lock().unwrap();
+    if let Some(token) = app.cancel_tokens.remove(&url) {
+        token.cancel();
+        println!("[AI] Analysis cancelled for: {}", url);
+    }
+    Ok(())
+}
+
+fn cleanup_cancel_token(state: &State<'_, Mutex<AppState>>, url: &str) {
+    if let Ok(mut app) = state.lock() {
+        app.cancel_tokens.remove(url);
+    }
 }
 
 // Review state commands
@@ -780,7 +844,8 @@ async fn codebase_analyze(
 
         let client = ai::AIClient::new();
         match client.call_with_system(&provider, &api_key, &model, system_prompt, &user_prompt).await {
-            Ok(summary) => {
+            Ok(ai_response) => {
+                let summary = ai_response.content;
                 debug!("[Analyze] AI profiler complete ({} chars)", summary.len());
                 let app = state.lock().unwrap();
                 let _ = app.db.update_repo_ai_summary(&user_id, &repo_full_name, &summary);
@@ -905,7 +970,7 @@ pub struct IndexStatus {
 #[tauri::command]
 async fn codebase_index_start(
     repo_full_name: String,
-    with_embeddings: Option<bool>,
+    _with_embeddings: Option<bool>,
     state: State<'_, Mutex<AppState>>,
 ) -> AppResult<()> {
     // Get user and linked repo info
@@ -1423,7 +1488,7 @@ fn draft_comments_clear(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let db = Database::new().expect("Failed to initialize database");
-    let app_state = Mutex::new(AppState { db });
+    let app_state = Mutex::new(AppState { db, cancel_tokens: HashMap::new() });
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -1461,6 +1526,7 @@ pub fn run() {
             github_submit_review,
             ai_analyze_pr,
             ai_analyze_pr_orchestrated,
+            ai_cancel_analysis,
             review_get_state,
             review_save_state,
             analysis_get,

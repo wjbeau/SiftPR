@@ -1,3 +1,4 @@
+use super::model_config;
 use super::types::AgentType;
 
 /// Get the system prompt for a specific agent type
@@ -203,18 +204,52 @@ pub fn build_agent_prompt(
     files_context: &str,
     codebase_context: Option<&str>,
 ) -> String {
-    let focus_reminder = match agent_type {
-        AgentType::Security => "IMPORTANT: Report ONLY security vulnerabilities. Do NOT report performance, architecture, or style issues — other agents cover those. If a finding doesn't have a security exploit scenario, omit it.",
-        AgentType::Architecture => "IMPORTANT: Report ONLY architectural and design issues. Do NOT report security vulnerabilities, performance problems, or style concerns — other agents cover those.",
-        AgentType::Style => "IMPORTANT: Report ONLY code style, readability, and consistency issues. Do NOT report security vulnerabilities, performance problems, or architecture concerns — other agents cover those.",
-        AgentType::Performance => "IMPORTANT: Report ONLY performance issues. Do NOT report security vulnerabilities, architecture problems, or style concerns — other agents cover those.",
-        AgentType::Research => "Focus on researching the codebase to find related code, usage patterns, and dependencies of the changed files. Report findings about how changes impact the broader codebase.",
-        AgentType::Profiler => "Focus on producing a codebase overview for reviewers.",
+    build_agent_prompt_for_model(agent_type, pr_title, pr_body, files_context, codebase_context, "")
+}
+
+/// Build the user prompt with model-aware adaptations
+pub fn build_agent_prompt_for_model(
+    agent_type: AgentType,
+    pr_title: &str,
+    pr_body: Option<&str>,
+    files_context: &str,
+    codebase_context: Option<&str>,
+    model: &str,
+) -> String {
+    let is_small = model_config::is_small_model(model);
+
+    let focus_reminder = if is_small {
+        // Condensed single-line scope for weaker models
+        match agent_type {
+            AgentType::Security => "Report ONLY security vulnerabilities. Skip performance/architecture/style.",
+            AgentType::Architecture => "Report ONLY architecture/design issues. Skip security/performance/style.",
+            AgentType::Style => "Report ONLY style/readability issues. Skip security/performance/architecture.",
+            AgentType::Performance => "Report ONLY performance issues. Skip security/architecture/style.",
+            AgentType::Research => "Research the codebase to answer the question.",
+            AgentType::Profiler => "Produce a codebase overview.",
+        }
+    } else {
+        match agent_type {
+            AgentType::Security => "IMPORTANT: Report ONLY security vulnerabilities. Do NOT report performance, architecture, or style issues — other agents cover those. If a finding doesn't have a security exploit scenario, omit it.",
+            AgentType::Architecture => "IMPORTANT: Report ONLY architectural and design issues. Do NOT report security vulnerabilities, performance problems, or style concerns — other agents cover those.",
+            AgentType::Style => "IMPORTANT: Report ONLY code style, readability, and consistency issues. Do NOT report security vulnerabilities, performance problems, or architecture concerns — other agents cover those.",
+            AgentType::Performance => "IMPORTANT: Report ONLY performance issues. Do NOT report security vulnerabilities, architecture problems, or style concerns — other agents cover those.",
+            AgentType::Research => "Focus on researching the codebase to find related code, usage patterns, and dependencies of the changed files. Report findings about how changes impact the broader codebase.",
+            AgentType::Profiler => "Focus on producing a codebase overview for reviewers.",
+        }
     };
 
     let codebase_section = codebase_context
         .map(|ctx| format!("\n## Codebase Context\n{}\n", ctx))
         .unwrap_or_default();
+
+    let few_shot_example = get_few_shot_example(agent_type);
+
+    let chain_of_thought = if !is_small {
+        "\nBefore your JSON response, briefly think through: What are the most significant changes? Which files need closest attention? Then provide your JSON.\n"
+    } else {
+        ""
+    };
 
     format!(
         r#"Analyze this pull request for {focus_area} issues.
@@ -229,7 +264,7 @@ pub fn build_agent_prompt(
 {files}
 
 {focus_reminder}
-
+{chain_of_thought}
 Respond with a JSON object in this exact format:
 {{
   "summary": {{
@@ -249,7 +284,7 @@ Respond with a JSON object in this exact format:
   ],
   "priority_files": ["file1.ts", "file2.ts"]
 }}
-
+{few_shot_example}
 Important:
 - ONLY include findings relevant to {focus_area}. Findings outside your domain will be DISCARDED. You are one of four parallel agents (security, architecture, style, performance) — trust that the others will cover their areas.
 - Use the EXACT filename as shown in the file headers (e.g., "src/components/Button.tsx", NOT "/src/components/Button.tsx")
@@ -264,7 +299,31 @@ Important:
         files = files_context,
         focus_reminder = focus_reminder,
         codebase_section = codebase_section,
+        few_shot_example = few_shot_example,
+        chain_of_thought = chain_of_thought,
     )
+}
+
+fn get_few_shot_example(agent_type: AgentType) -> &'static str {
+    match agent_type {
+        AgentType::Security => r#"
+Example finding:
+{"file": "src/api/auth.ts", "line": 45, "message": "User input passed directly to SQL query without parameterization, enabling SQL injection", "severity": "critical", "category": "injection", "suggestion": "Use parameterized queries: db.query('SELECT * FROM users WHERE id = ?', [userId])"}
+"#,
+        AgentType::Architecture => r#"
+Example finding:
+{"file": "src/services/order.ts", "line": 12, "message": "OrderService directly imports and calls PaymentGateway, creating tight coupling. Changes to payment processing will require modifying order logic.", "severity": "medium", "category": "coupling", "suggestion": "Inject PaymentGateway as a dependency via constructor or use an interface"}
+"#,
+        AgentType::Style => r#"
+Example finding:
+{"file": "src/utils/helpers.ts", "line": 28, "message": "Function 'processData' is 85 lines long with deeply nested conditionals, making it hard to follow", "severity": "medium", "category": "complexity", "suggestion": "Extract the validation logic into a separate validateInput() function"}
+"#,
+        AgentType::Performance => r#"
+Example finding:
+{"file": "src/api/users.ts", "line": 34, "message": "Loading all user records then filtering in memory. With 100k+ users this will consume excessive memory and time.", "severity": "high", "category": "n+1-query", "suggestion": "Move the filter to the SQL query: SELECT * FROM users WHERE active = true LIMIT 100"}
+"#,
+        _ => "",
+    }
 }
 
 /// Build a prompt for grouping files by functional area

@@ -3,9 +3,12 @@
 //! This module handles the iterative process of:
 //! 1. Sending a request to the AI with available tools
 //! 2. Parsing tool calls from the response
-//! 3. Executing the tools
+//! 3. Executing the tools (in parallel)
 //! 4. Sending results back to the AI
 //! 5. Repeating until the AI returns a final response
+//!
+//! Graceful degradation: when limits are hit, attempts to extract partial
+//! results rather than returning an error.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,9 +18,13 @@ use super::builtin::BuiltinToolRegistry;
 use super::formatter::{get_formatter, ToolFormatter};
 use super::{ToolCall, ToolContext, ToolDefinition, ToolExecutionConfig, ToolResult};
 use crate::ai::client::AIClient;
+use crate::ai::events::AnalysisEvent;
 use crate::ai::mcp::MCPManager;
 use crate::ai::types::SharedDiagnostics;
 use crate::error::{AppError, AppResult};
+
+/// Optional callback for emitting analysis events from the executor
+pub type ToolEventEmitter = Arc<dyn Fn(AnalysisEvent) + Send + Sync>;
 
 /// Executes tools for an AI agent in an iterative loop
 pub struct ToolExecutor {
@@ -27,6 +34,7 @@ pub struct ToolExecutor {
     agent_type: Option<String>,
     diagnostics: Option<SharedDiagnostics>,
     diag_agent: Option<String>,
+    event_emitter: Option<ToolEventEmitter>,
 }
 
 impl ToolExecutor {
@@ -38,6 +46,7 @@ impl ToolExecutor {
             agent_type: None,
             diagnostics: None,
             diag_agent: None,
+            event_emitter: None,
         }
     }
 
@@ -46,6 +55,7 @@ impl ToolExecutor {
     }
 
     /// Set the MCP manager for MCP tool support
+    #[allow(dead_code)]
     pub fn with_mcp(mut self, mcp_manager: Arc<MCPManager>, agent_type: &str) -> Self {
         self.mcp_manager = Some(mcp_manager);
         self.agent_type = Some(agent_type.to_string());
@@ -56,6 +66,12 @@ impl ToolExecutor {
     pub fn with_diagnostics(mut self, diag: SharedDiagnostics, agent_name: &str) -> Self {
         self.diagnostics = Some(diag);
         self.diag_agent = Some(agent_name.to_string());
+        self
+    }
+
+    /// Attach an event emitter for real-time progress events
+    pub fn with_event_emitter(mut self, emitter: ToolEventEmitter) -> Self {
+        self.event_emitter = Some(emitter);
         self
     }
 
@@ -83,9 +99,9 @@ impl ToolExecutor {
     ///
     /// This runs the iterative tool-calling loop until either:
     /// - The AI returns a final response without tool calls
-    /// - Max iterations is reached
-    /// - Total timeout is exceeded
-    /// - Max total tool calls is reached
+    /// - Max iterations is reached (gracefully degrades)
+    /// - Total timeout is exceeded (gracefully degrades)
+    /// - Max total tool calls is reached (gracefully degrades)
     pub async fn execute(
         &self,
         client: &AIClient,
@@ -121,19 +137,20 @@ impl ToolExecutor {
                 "user_message_preview": initial_message.chars().take(500).collect::<String>(),
                 "note": "no-tools fallback, using call_with_system",
             }));
-            let response = client
+            let ai_response = client
                 .call_with_system(provider, api_key, model, system_prompt, initial_message)
                 .await?;
             self.diag_log("llm_response", serde_json::json!({
-                "response_len": response.len(),
+                "response_len": ai_response.content.len(),
                 "has_tool_calls": false,
-                "response_preview": response.chars().take(1000).collect::<String>(),
+                "response_preview": ai_response.content.chars().take(1000).collect::<String>(),
             }));
             return Ok(ExecutionResult {
-                response,
+                response: ai_response.content,
                 tool_calls_made: 0,
                 iterations: 0,
                 total_time_ms: start_time.elapsed().as_millis() as u64,
+                partial: false,
             });
         }
 
@@ -145,31 +162,68 @@ impl ToolExecutor {
             "content": initial_message
         })];
 
-        let mut iterations = 0;
-        let mut total_tool_calls = 0;
+        let mut iterations = 0u32;
+        let mut total_tool_calls = 0u32;
+        let mut last_assistant_text = String::new();
+        let mut nudge_sent = false;
 
         loop {
-            // Check limits
-            if iterations >= self.config.max_iterations {
-                return Err(AppError::ToolExecution(format!(
-                    "Max iterations ({}) reached",
-                    self.config.max_iterations
-                )));
-            }
+            // Check limits — gracefully degrade instead of hard error
+            let limit_reason = if iterations >= self.config.max_iterations {
+                Some(format!("Max iterations ({}) reached", self.config.max_iterations))
+            } else if total_tool_calls >= self.config.max_total_tool_calls {
+                Some(format!("Max tool calls ({}) reached", self.config.max_total_tool_calls))
+            } else {
+                let elapsed = start_time.elapsed().as_millis() as u64;
+                if elapsed > self.config.total_timeout_ms {
+                    Some(format!("Total timeout ({} ms) exceeded", self.config.total_timeout_ms))
+                } else {
+                    None
+                }
+            };
 
-            if total_tool_calls >= self.config.max_total_tool_calls {
-                return Err(AppError::ToolExecution(format!(
-                    "Max tool calls ({}) reached",
-                    self.config.max_total_tool_calls
-                )));
-            }
+            if let Some(reason) = limit_reason {
+                self.diag_log("limit_hit", serde_json::json!({
+                    "reason": &reason,
+                    "iterations": iterations,
+                    "total_tool_calls": total_tool_calls,
+                }));
 
-            let elapsed = start_time.elapsed().as_millis() as u64;
-            if elapsed > self.config.total_timeout_ms {
-                return Err(AppError::ToolExecution(format!(
-                    "Total timeout ({} ms) exceeded",
-                    self.config.total_timeout_ms
-                )));
+                // Try to extract partial result from the last assistant response
+                if !last_assistant_text.is_empty() {
+                    return Ok(ExecutionResult {
+                        response: last_assistant_text,
+                        tool_calls_made: total_tool_calls,
+                        iterations,
+                        total_time_ms: start_time.elapsed().as_millis() as u64,
+                        partial: true,
+                    });
+                }
+
+                // Make one final short-timeout call asking for immediate JSON output
+                println!("[ToolExecutor] Limit hit ({}), requesting final output", reason);
+                let final_prompt = "You have run out of time/iterations. Please provide your analysis NOW in JSON format based on what you've found so far. Respond with ONLY the JSON object.";
+                messages.push(serde_json::json!({"role": "user", "content": final_prompt}));
+
+                match timeout(
+                    Duration::from_secs(30),
+                    client.call_with_tools(provider, api_key, model, system_prompt, &messages, &serde_json::json!([]))
+                ).await {
+                    Ok(Ok(response)) => {
+                        let final_text = formatter.extract_final_response(&response)
+                            .unwrap_or_default();
+                        return Ok(ExecutionResult {
+                            response: final_text,
+                            tool_calls_made: total_tool_calls,
+                            iterations,
+                            total_time_ms: start_time.elapsed().as_millis() as u64,
+                            partial: true,
+                        });
+                    }
+                    _ => {
+                        return Err(AppError::ToolExecution(reason));
+                    }
+                }
             }
 
             // Make API call with tools
@@ -198,23 +252,68 @@ impl ToolExecutor {
 
             // Check if response contains tool calls
             if !formatter.has_tool_calls(&response) {
-                // No more tool calls, extract and return final response
-                let final_response = formatter
-                    .extract_final_response(&response)
-                    .ok_or_else(|| AppError::AIProvider("No response content".to_string()))?;
+                // No tool calls — extract final response
+                let final_response = formatter.extract_final_response(&response);
+
+                if let Some(text) = &final_response {
+                    // If this is the first iteration and model didn't call tools, handle it
+                    if iterations == 0 && !nudge_sent {
+                        // Check if the text contains valid JSON (the model might have answered directly)
+                        if text.contains('{') && text.contains("summary") {
+                            // Looks like a valid direct response
+                            self.diag_log("llm_response", serde_json::json!({
+                                "response_len": text.len(),
+                                "has_tool_calls": false,
+                                "note": "direct_json_response_without_tools",
+                                "response_preview": text.chars().take(1000).collect::<String>(),
+                                "raw_response": truncate_json(&response, 2000),
+                            }));
+
+                            return Ok(ExecutionResult {
+                                response: text.clone(),
+                                tool_calls_made: 0,
+                                iterations: 0,
+                                total_time_ms: start_time.elapsed().as_millis() as u64,
+                                partial: false,
+                            });
+                        }
+
+                        // Send a nudge asking the model to use tools
+                        nudge_sent = true;
+                        self.diag_log("nudge_sent", serde_json::json!({
+                            "reason": "no_tool_calls_on_first_iteration",
+                        }));
+
+                        messages.push(self.format_assistant_message(provider, &response, &[]));
+                        messages.push(serde_json::json!({
+                            "role": "user",
+                            "content": "You have tools available (search_repo, read_file). Please use them to investigate the codebase before providing your analysis. Use search_repo or read_file to verify your findings."
+                        }));
+                        iterations += 1;
+                        continue;
+                    }
+                }
+
+                let final_text = final_response
+                    .unwrap_or_else(|| last_assistant_text.clone());
+
+                if final_text.is_empty() {
+                    return Err(AppError::AIProvider("No response content".to_string()));
+                }
 
                 self.diag_log("llm_response", serde_json::json!({
-                    "response_len": final_response.len(),
+                    "response_len": final_text.len(),
                     "has_tool_calls": false,
-                    "response_preview": final_response.chars().take(1000).collect::<String>(),
+                    "response_preview": final_text.chars().take(1000).collect::<String>(),
                     "raw_response": truncate_json(&response, 2000),
                 }));
 
                 return Ok(ExecutionResult {
-                    response: final_response,
+                    response: final_text,
                     tool_calls_made: total_tool_calls,
                     iterations,
                     total_time_ms: start_time.elapsed().as_millis() as u64,
+                    partial: false,
                 });
             }
 
@@ -222,6 +321,13 @@ impl ToolExecutor {
                 "has_tool_calls": true,
                 "raw_response": truncate_json(&response, 2000),
             }));
+
+            // Also capture any text the assistant sent alongside tool calls
+            if let Some(text) = formatter.extract_final_response(&response) {
+                if !text.is_empty() {
+                    last_assistant_text = text;
+                }
+            }
 
             // Parse tool calls
             let tool_calls = formatter.parse_tool_calls(&response);
@@ -234,6 +340,17 @@ impl ToolExecutor {
                 call_count
             );
 
+            // Emit tool call events for real-time progress
+            if let (Some(ref emitter), Some(ref agent_name)) = (&self.event_emitter, &self.diag_agent) {
+                for tc in &tool_calls {
+                    emitter(AnalysisEvent::AgentToolCall {
+                        agent: agent_name.clone(),
+                        tool: tc.name.clone(),
+                        iteration: iterations + 1,
+                    });
+                }
+            }
+
             self.diag_log("tool_calls", serde_json::json!({
                 "iteration": iterations + 1,
                 "calls": tool_calls.iter().map(|tc| serde_json::json!({
@@ -242,13 +359,28 @@ impl ToolExecutor {
                 })).collect::<Vec<_>>(),
             }));
 
-            // Execute each tool call
+            // Execute tool calls in parallel
+            let results = self.execute_tools_parallel(&tool_calls, context).await;
+
+            // Add assistant response to messages (provider-specific format)
+            messages.push(self.format_assistant_message(provider, &response, &tool_calls));
+
+            // Add tool results to messages
+            let results_messages = self.format_tool_results_messages(provider, &results, formatter.as_ref());
+            messages.extend(results_messages);
+
+            iterations += 1;
+        }
+    }
+
+    /// Execute multiple tool calls in parallel using tokio::join_all
+    async fn execute_tools_parallel(&self, tool_calls: &[ToolCall], context: &ToolContext) -> Vec<ToolResult> {
+        if tool_calls.len() <= 1 {
+            // Single tool call — no parallelism needed
             let mut results = Vec::new();
-            for call in &tool_calls {
+            for call in tool_calls {
                 let tool_start = Instant::now();
-                let result = self
-                    .execute_single_tool(call, context)
-                    .await;
+                let result = self.execute_single_tool(call, context).await;
                 let tool_duration_ms = tool_start.elapsed().as_millis() as u64;
                 println!(
                     "[ToolExecutor] Tool {} result: success={}",
@@ -263,16 +395,113 @@ impl ToolExecutor {
                 }));
                 results.push(result);
             }
-
-            // Add assistant response to messages (provider-specific format)
-            messages.push(self.format_assistant_message(provider, &response, &tool_calls));
-
-            // Add tool results to messages
-            let results_messages = self.format_tool_results_messages(provider, &results, formatter.as_ref());
-            messages.extend(results_messages);
-
-            iterations += 1;
+            return results;
         }
+
+        // Multiple tool calls — execute in parallel
+        println!("[ToolExecutor] Executing {} tools in parallel", tool_calls.len());
+
+        // We can't easily use join_all with &self borrow, so collect futures
+        // by executing them with individual spawned tasks sharing context
+        let mut handles = Vec::new();
+        for call in tool_calls {
+            let call_clone = call.clone();
+            let context_clone = context.clone();
+            let builtin_tools = self.builtin_tools.clone_registry();
+            let config_timeout = self.config.timeout_per_tool_ms;
+            let mcp = self.mcp_manager.clone();
+            let agent_type = self.agent_type.clone();
+
+            let handle = tokio::spawn(async move {
+                let tool_timeout = Duration::from_millis(config_timeout);
+
+                // Check if this is an MCP tool
+                if let Some((server_name, tool_name)) = MCPManager::parse_mcp_tool_name(&call_clone.name) {
+                    if let (Some(mcp), Some(agent_type)) = (&mcp, &agent_type) {
+                        let mcp = Arc::clone(mcp);
+                        let agent_type = agent_type.clone();
+                        let arguments = call_clone.arguments.clone();
+                        let call_id = call_clone.id.clone();
+
+                        let result = timeout(tool_timeout, async move {
+                            tokio::task::spawn_blocking(move || {
+                                mcp.execute_tool(&agent_type, &server_name, &tool_name, arguments)
+                            })
+                            .await
+                            .map_err(|e| AppError::MCP(format!("Task join error: {}", e)))?
+                        })
+                        .await;
+
+                        let tool_name = call_clone.name.clone();
+                        return match result {
+                            Ok(Ok(mut tool_result)) => {
+                                tool_result.call_id = call_id;
+                                tool_result.tool_name = tool_name;
+                                tool_result
+                            }
+                            Ok(Err(e)) => ToolResult::error(call_id, e.to_string()),
+                            Err(_) => ToolResult::error(
+                                call_id,
+                                format!("MCP tool execution timed out after {} ms", config_timeout),
+                            ),
+                        };
+                    }
+                }
+
+                // Execute builtin tool with timeout
+                let result = timeout(
+                    tool_timeout,
+                    builtin_tools.execute(&call_clone.name, call_clone.arguments.clone(), &context_clone),
+                )
+                .await;
+
+                match result {
+                    Ok(Ok(mut tool_result)) => {
+                        tool_result.call_id = call_clone.id.clone();
+                        tool_result.tool_name = call_clone.name.clone();
+                        tool_result
+                    }
+                    Ok(Err(e)) => ToolResult::error(call_clone.id.clone(), e.to_string()),
+                    Err(_) => ToolResult::error(
+                        call_clone.id.clone(),
+                        format!("Tool execution timed out after {} ms", config_timeout),
+                    ),
+                }
+            });
+
+            handles.push((call.name.clone(), handle));
+        }
+
+        let mut results = Vec::new();
+        for (tool_name, handle) in handles {
+            let tool_start = Instant::now();
+            match handle.await {
+                Ok(result) => {
+                    let tool_duration_ms = tool_start.elapsed().as_millis() as u64;
+                    println!(
+                        "[ToolExecutor] Tool {} result: success={}",
+                        tool_name, result.success
+                    );
+                    self.diag_log("tool_result", serde_json::json!({
+                        "tool_name": tool_name,
+                        "success": result.success,
+                        "output_len": result.output.len(),
+                        "duration_ms": tool_duration_ms,
+                        "error": result.error,
+                    }));
+                    results.push(result);
+                }
+                Err(e) => {
+                    println!("[ToolExecutor] Tool {} panicked: {}", tool_name, e);
+                    results.push(ToolResult::error(
+                        String::new(),
+                        format!("Tool execution panicked: {}", e),
+                    ));
+                }
+            }
+        }
+
+        results
     }
 
     async fn execute_single_tool(&self, call: &ToolCall, context: &ToolContext) -> ToolResult {
@@ -378,11 +607,26 @@ impl ToolExecutor {
                     })
                     .collect();
 
-                serde_json::json!({
-                    "role": "assistant",
-                    "content": null,
-                    "tool_calls": openai_tool_calls
-                })
+                if openai_tool_calls.is_empty() {
+                    // No tool calls — just text response
+                    let text = response.get("choices")
+                        .and_then(|c| c.as_array())
+                        .and_then(|c| c.first())
+                        .and_then(|c| c.get("message"))
+                        .and_then(|m| m.get("content"))
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("");
+                    serde_json::json!({
+                        "role": "assistant",
+                        "content": text
+                    })
+                } else {
+                    serde_json::json!({
+                        "role": "assistant",
+                        "content": null,
+                        "tool_calls": openai_tool_calls
+                    })
+                }
             }
         }
     }
@@ -454,5 +698,9 @@ pub struct ExecutionResult {
     /// Number of AI request/response iterations
     pub iterations: u32,
     /// Total execution time in milliseconds
+    #[allow(dead_code)]
     pub total_time_ms: u64,
+    /// Whether this result is partial (limits were hit before completion)
+    #[allow(dead_code)]
+    pub partial: bool,
 }

@@ -1,8 +1,21 @@
-import { createContext, useContext, useCallback, useRef, useState, type ReactNode } from "react";
-import { ai, analysis as analysisApi, OrchestratedAnalysis } from "@/lib/api";
+import { createContext, useContext, useCallback, useRef, useState, useEffect, type ReactNode } from "react";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { ai, analysis as analysisApi, OrchestratedAnalysis, type AnalysisEvent } from "@/lib/api";
 import { logger } from "@/lib/logger";
 
 export type AnalysisMode = "pr_only" | "with_context";
+
+export type AgentStatus = "pending" | "running" | "completed" | "failed";
+
+export interface AgentProgress {
+  status: AgentStatus;
+  mode?: string;
+  findingCount?: number;
+  timeMs?: number;
+  error?: string;
+  lastToolCall?: string;
+  toolIteration?: number;
+}
 
 export interface AnalysisEntry {
   isAnalyzing: boolean;
@@ -10,6 +23,8 @@ export interface AnalysisEntry {
   analysisError: string | null;
   analysisMode: AnalysisMode;
   lastAnalysisMode: AnalysisMode | null;
+  agentProgress: Record<string, AgentProgress>;
+  isGroupingFiles: boolean;
 }
 
 const defaultEntry: AnalysisEntry = {
@@ -18,6 +33,8 @@ const defaultEntry: AnalysisEntry = {
   analysisError: null,
   analysisMode: "pr_only",
   lastAnalysisMode: null,
+  agentProgress: {},
+  isGroupingFiles: false,
 };
 
 interface AnalysisContextValue {
@@ -31,6 +48,7 @@ interface AnalysisContextValue {
     prNumber: number,
     headSha: string
   ) => void;
+  cancelAnalysis: (key: string, prUrl: string) => void;
   setAnalysisMode: (key: string, mode: AnalysisMode) => void;
   loadCachedAnalysis: (
     key: string,
@@ -50,6 +68,7 @@ export function makeAnalysisKey(owner: string, repo: string, prNumber: string | 
 export function AnalysisProvider({ children }: { children: ReactNode }) {
   const [entries, setEntries] = useState<Record<string, AnalysisEntry>>({});
   const loadedKeysRef = useRef<Set<string>>(new Set());
+  const activeUrlsRef = useRef<Map<string, string>>(new Map()); // key -> prUrl
 
   const getEntry = useCallback(
     (key: string): AnalysisEntry => entries[key] ?? defaultEntry,
@@ -65,6 +84,83 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
     },
     []
   );
+
+  // Listen for analysis progress events from the backend
+  useEffect(() => {
+    let unlisten: UnlistenFn | null = null;
+
+    listen<AnalysisEvent>("analysis-progress", (event) => {
+      const payload = event.payload;
+
+      // Find which key this event is for (match by active URLs)
+      const activeKey = Array.from(activeUrlsRef.current.entries())
+        .find(([_k, _url]) => true)?.[0]; // Use the first active analysis
+
+      if (!activeKey) return;
+
+      setEntries((prev) => {
+        const entry = prev[activeKey] ?? defaultEntry;
+        const agentProgress = { ...entry.agentProgress };
+
+        switch (payload.type) {
+          case "AnalysisStarted":
+            // Initialize all agents as pending
+            for (const agent of ["security", "architecture", "style", "performance"]) {
+              agentProgress[agent] = { status: "pending" };
+            }
+            return { ...prev, [activeKey]: { ...entry, agentProgress } };
+
+          case "AgentStarted":
+            agentProgress[payload.agent] = { status: "running", mode: payload.mode };
+            return { ...prev, [activeKey]: { ...entry, agentProgress } };
+
+          case "AgentToolCall":
+            if (agentProgress[payload.agent]) {
+              agentProgress[payload.agent] = {
+                ...agentProgress[payload.agent],
+                lastToolCall: payload.tool,
+                toolIteration: payload.iteration,
+              };
+            }
+            return { ...prev, [activeKey]: { ...entry, agentProgress } };
+
+          case "AgentCompleted":
+            agentProgress[payload.agent] = {
+              status: "completed",
+              findingCount: payload.finding_count,
+              timeMs: payload.time_ms,
+            };
+            return { ...prev, [activeKey]: { ...entry, agentProgress } };
+
+          case "AgentFailed":
+            agentProgress[payload.agent] = {
+              status: "failed",
+              error: payload.error,
+            };
+            return { ...prev, [activeKey]: { ...entry, agentProgress } };
+
+          case "FileGroupingStarted":
+            return { ...prev, [activeKey]: { ...entry, isGroupingFiles: true } };
+
+          case "FileGroupingCompleted":
+            return { ...prev, [activeKey]: { ...entry, isGroupingFiles: false } };
+
+          case "AnalysisCompleted":
+          case "AnalysisCancelled":
+            return prev; // Handled by the promise resolution
+
+          default:
+            return prev;
+        }
+      });
+    }).then((fn) => {
+      unlisten = fn;
+    });
+
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
 
   const runAnalysis = useCallback(
     (
@@ -85,7 +181,12 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
           isAnalyzing: true,
           analysisError: null,
           analysisMode: mode,
+          agentProgress: {},
+          isGroupingFiles: false,
         };
+
+        // Track active URL
+        activeUrlsRef.current.set(key, prUrl);
 
         // Fire the async work
         const withContext = mode === "with_context";
@@ -94,6 +195,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
         ai.analyzePROrchestrated(prUrl, withContext)
           .then(async (result) => {
             logger.log("Analysis result:", result);
+            activeUrlsRef.current.delete(key);
             updateEntry(key, {
               analysis: result,
               lastAnalysisMode: mode,
@@ -110,6 +212,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
           })
           .catch((e) => {
             logger.error("Analysis failed:", e);
+            activeUrlsRef.current.delete(key);
             const errorMsg =
               typeof e === "string"
                 ? e
@@ -122,6 +225,20 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
           });
 
         return { ...prev, [key]: entry };
+      });
+    },
+    [updateEntry]
+  );
+
+  const cancelAnalysis = useCallback(
+    (key: string, prUrl: string) => {
+      ai.cancelAnalysis(prUrl).catch((e) => {
+        logger.error("Failed to cancel analysis:", e);
+      });
+      activeUrlsRef.current.delete(key);
+      updateEntry(key, {
+        isAnalyzing: false,
+        analysisError: "Analysis cancelled",
       });
     },
     [updateEntry]
@@ -181,7 +298,7 @@ export function AnalysisProvider({ children }: { children: ReactNode }) {
 
   return (
     <AnalysisContext.Provider
-      value={{ getEntry, runAnalysis, setAnalysisMode, loadCachedAnalysis }}
+      value={{ getEntry, runAnalysis, cancelAnalysis, setAnalysisMode, loadCachedAnalysis }}
     >
       {children}
     </AnalysisContext.Provider>

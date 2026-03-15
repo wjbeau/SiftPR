@@ -475,7 +475,7 @@ fn detect_file_organization(root: &Path) -> String {
     let mut has_types = false;
     let mut has_utils = false;
     let mut has_services = false;
-    let mut has_models = false;
+    let mut _has_models = false;
 
     if let Ok(entries) = fs::read_dir(&check_path) {
         for entry in entries.filter_map(|e| e.ok()) {
@@ -485,7 +485,7 @@ fn detect_file_organization(root: &Path) -> String {
             if name == "types" || name == "interfaces" { has_types = true; }
             if name == "utils" || name == "helpers" || name == "lib" { has_utils = true; }
             if name == "services" || name == "api" { has_services = true; }
-            if name == "models" || name == "entities" { has_models = true; }
+            if name == "models" || name == "entities" { _has_models = true; }
         }
     }
 

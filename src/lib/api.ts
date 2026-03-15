@@ -280,7 +280,22 @@ export const ai = {
   analyzePR: (url: string) => invoke<PRAnalysis>("ai_analyze_pr", { url }),
   analyzePROrchestrated: (url: string, withCodebaseContext?: boolean) =>
     invoke<OrchestratedAnalysis>("ai_analyze_pr_orchestrated", { url, withCodebaseContext }),
+  cancelAnalysis: (url: string) =>
+    invoke<void>("ai_cancel_analysis", { url }),
 };
+
+// Analysis event types (matches Rust AnalysisEvent)
+export type AnalysisEvent =
+  | { type: "AnalysisStarted"; agent_count: number }
+  | { type: "AgentStarted"; agent: string; mode: string }
+  | { type: "AgentToolCall"; agent: string; tool: string; iteration: number }
+  | { type: "AgentRetrying"; agent: string; attempt: number; error: string }
+  | { type: "AgentCompleted"; agent: string; finding_count: number; time_ms: number }
+  | { type: "AgentFailed"; agent: string; error: string }
+  | { type: "FileGroupingStarted" }
+  | { type: "FileGroupingCompleted"; group_count: number }
+  | { type: "AnalysisCompleted"; total_time_ms: number }
+  | { type: "AnalysisCancelled" };
 
 // Analysis Cache API
 export const analysis = {

@@ -360,6 +360,7 @@ impl ToolFormatter for GoogleFormatter {
 }
 
 /// OpenRouter uses OpenAI format
+#[allow(dead_code)]
 pub type OpenRouterFormatter = OpenAIFormatter;
 
 /// Get the appropriate formatter for a provider

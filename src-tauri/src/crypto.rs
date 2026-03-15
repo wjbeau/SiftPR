@@ -158,6 +158,7 @@ pub fn decrypt(encrypted: &str) -> AppResult<String> {
 
 /// Check if data was encrypted with the legacy key and needs migration.
 /// Returns the decrypted value if migration is needed, None otherwise.
+#[allow(dead_code)]
 pub fn check_needs_migration(encrypted: &str) -> Option<String> {
     let combined = STANDARD.decode(encrypted).ok()?;
 
@@ -187,6 +188,7 @@ pub fn check_needs_migration(encrypted: &str) -> Option<String> {
 
 /// Re-encrypt data from legacy key to secure key.
 /// Returns the newly encrypted value.
+#[allow(dead_code)]
 pub fn migrate_to_secure_key(plaintext: &str) -> AppResult<String> {
     encrypt(plaintext)
 }

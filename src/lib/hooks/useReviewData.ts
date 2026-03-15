@@ -11,7 +11,7 @@ export function useReviewData(owner: string | undefined, repo: string | undefine
   // Analysis context
   const analysisCtx = useAnalysis();
   const analysisKey = owner && repo && prNumber ? makeAnalysisKey(owner, repo, prNumber) : "";
-  const { isAnalyzing, analysis, analysisError, analysisMode, lastAnalysisMode } = analysisCtx.getEntry(analysisKey);
+  const { isAnalyzing, analysis, analysisError, analysisMode, lastAnalysisMode, agentProgress, isGroupingFiles } = analysisCtx.getEntry(analysisKey);
   const setAnalysisMode = useCallback((mode: AnalysisMode) => analysisCtx.setAnalysisMode(analysisKey, mode), [analysisCtx, analysisKey]);
 
   // Queries
@@ -89,6 +89,11 @@ export function useReviewData(owner: string | undefined, repo: string | undefine
     if (!prUrl || !owner || !repo || !pr?.head.sha || !analysisKey) return;
     analysisCtx.runAnalysis(analysisKey, prUrl, analysisMode, owner, repo, prNumberInt, pr.head.sha);
   }, [prUrl, analysisMode, owner, repo, prNumberInt, pr?.head.sha, analysisKey, analysisCtx]);
+
+  const cancelAnalysis = useCallback(() => {
+    if (!prUrl || !analysisKey) return;
+    analysisCtx.cancelAnalysis(analysisKey, prUrl);
+  }, [prUrl, analysisKey, analysisCtx]);
 
   // Get file analysis for selected file
   const selectedFileAnalysis = useMemo(() => {
@@ -186,6 +191,9 @@ export function useReviewData(owner: string | undefined, repo: string | undefine
     lastAnalysisMode,
     setAnalysisMode,
     runAnalysis,
+    cancelAnalysis,
+    agentProgress,
+    isGroupingFiles,
     selectedFileAnalysis,
     // File state
     selectedFile,

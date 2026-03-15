@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::{AppError, AppResult};
 use crate::github::GitHubFile;
 
-use super::prompts::{build_files_context, truncate_patch};
+use super::model_config;
+use super::prompts::build_files_context;
 use super::types::TokenUsage;
 
 /// Response from AI provider including token usage
@@ -126,8 +127,8 @@ impl AIClient {
         let prompt = build_legacy_analysis_prompt(pr_title, pr_body, files);
         let system = "You are an expert code reviewer. Analyze pull requests and provide structured feedback in JSON format.";
 
-        let response = self.call_provider(provider, api_key, model, system, &prompt).await?;
-        parse_legacy_analysis_response(&response)
+        let ai_response = self.call_provider(provider, api_key, model, system, &prompt).await?;
+        parse_legacy_analysis_response(&ai_response.content)
     }
 
     /// Call AI provider with custom system prompt (for agent system)
@@ -138,7 +139,7 @@ impl AIClient {
         model: &str,
         system_prompt: &str,
         user_prompt: &str,
-    ) -> AppResult<String> {
+    ) -> AppResult<AIResponse> {
         self.call_provider(provider, api_key, model, system_prompt, user_prompt).await
     }
 
@@ -204,12 +205,19 @@ impl AIClient {
         })];
         all_messages.extend(messages.iter().cloned());
 
-        let body = serde_json::json!({
+        // Add JSON mode for OpenAI/OpenRouter when no tools are provided (empty array)
+        let tools_empty = tools.as_array().map(|a| a.is_empty()).unwrap_or(false);
+        let mut body = serde_json::json!({
             "model": model,
             "messages": all_messages,
-            "tools": tools,
             "temperature": 0.3
         });
+        if !tools_empty {
+            body["tools"] = tools.clone();
+        }
+        if tools_empty && model_config::supports_json_mode(provider, model) {
+            body["response_format"] = serde_json::json!({"type": "json_object"});
+        }
 
         let url_clone = url.clone();
         let api_key_owned = api_key.to_string();
@@ -272,9 +280,10 @@ impl AIClient {
             })
             .collect();
 
+        let max_tokens = model_config::recommended_max_tokens("anthropic", model);
         let body = serde_json::json!({
             "model": model,
-            "max_tokens": 4096,
+            "max_tokens": max_tokens,
             "system": system_prompt,
             "messages": anthropic_messages,
             "tools": tools
@@ -346,15 +355,22 @@ impl AIClient {
             })
             .collect();
 
+        // Add responseMimeType for JSON when no tools are active
+        let tools_empty = tools.as_array().map(|a| a.is_empty()).unwrap_or(false);
+        let mut gen_config = serde_json::json!({
+            "temperature": 0.3
+        });
+        if tools_empty {
+            gen_config["responseMimeType"] = serde_json::json!("application/json");
+        }
+
         let body = serde_json::json!({
             "systemInstruction": {
                 "parts": [{"text": system_prompt}]
             },
             "contents": contents,
             "tools": tools,
-            "generationConfig": {
-                "temperature": 0.3
-            }
+            "generationConfig": gen_config
         });
 
         let url_clone = url.clone();
@@ -446,7 +462,7 @@ impl AIClient {
         model: &str,
         system_prompt: &str,
         user_prompt: &str,
-    ) -> AppResult<String> {
+    ) -> AppResult<AIResponse> {
         match provider {
             "openai" => self.call_openai(api_key, model, system_prompt, user_prompt).await,
             "anthropic" => self.call_anthropic(api_key, model, system_prompt, user_prompt).await,
@@ -467,22 +483,43 @@ impl AIClient {
         }
     }
 
-    async fn call_openai(&self, api_key: &str, model: &str, system_prompt: &str, user_prompt: &str) -> AppResult<String> {
-        #[derive(Deserialize)]
-        struct OpenAIResponse {
-            choices: Vec<OpenAIChoice>,
-        }
+    /// Parse token usage from an OpenAI-compatible response JSON
+    fn parse_openai_usage(data: &serde_json::Value) -> Option<TokenUsage> {
+        let usage = data.get("usage")?;
+        let prompt = usage.get("prompt_tokens")?.as_u64()? as u32;
+        let completion = usage.get("completion_tokens")?.as_u64()? as u32;
+        Some(TokenUsage {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            total_tokens: prompt + completion,
+        })
+    }
 
-        #[derive(Deserialize)]
-        struct OpenAIChoice {
-            message: OpenAIMessage,
-        }
+    /// Parse token usage from an Anthropic response JSON
+    fn parse_anthropic_usage(data: &serde_json::Value) -> Option<TokenUsage> {
+        let usage = data.get("usage")?;
+        let prompt = usage.get("input_tokens")?.as_u64()? as u32;
+        let completion = usage.get("output_tokens")?.as_u64()? as u32;
+        Some(TokenUsage {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            total_tokens: prompt + completion,
+        })
+    }
 
-        #[derive(Deserialize)]
-        struct OpenAIMessage {
-            content: String,
-        }
+    /// Parse token usage from a Google response JSON
+    fn parse_google_usage(data: &serde_json::Value) -> Option<TokenUsage> {
+        let usage = data.get("usageMetadata")?;
+        let prompt = usage.get("promptTokenCount")?.as_u64()? as u32;
+        let completion = usage.get("candidatesTokenCount")?.as_u64()? as u32;
+        Some(TokenUsage {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            total_tokens: prompt + completion,
+        })
+    }
 
+    async fn call_openai(&self, api_key: &str, model: &str, system_prompt: &str, user_prompt: &str) -> AppResult<AIResponse> {
         let api_key_owned = api_key.to_string();
         let body = serde_json::json!({
             "model": model,
@@ -516,28 +553,22 @@ impl AIClient {
             )));
         }
 
-        let data: OpenAIResponse = response.json().await?;
-        data.choices
-            .first()
-            .map(|c| c.message.content.clone())
-            .ok_or_else(|| AppError::AIProvider("No response from OpenAI".to_string()))
+        let data: serde_json::Value = response.json().await?;
+        let token_usage = Self::parse_openai_usage(&data);
+        let content = data["choices"][0]["message"]["content"]
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| AppError::AIProvider("No response from OpenAI".to_string()))?;
+
+        Ok(AIResponse { content, token_usage })
     }
 
-    async fn call_anthropic(&self, api_key: &str, model: &str, system_prompt: &str, user_prompt: &str) -> AppResult<String> {
-        #[derive(Deserialize)]
-        struct AnthropicResponse {
-            content: Vec<AnthropicContent>,
-        }
-
-        #[derive(Deserialize)]
-        struct AnthropicContent {
-            text: String,
-        }
-
+    async fn call_anthropic(&self, api_key: &str, model: &str, system_prompt: &str, user_prompt: &str) -> AppResult<AIResponse> {
         let api_key_owned = api_key.to_string();
+        let max_tokens = model_config::recommended_max_tokens("anthropic", model);
         let body = serde_json::json!({
             "model": model,
-            "max_tokens": 4096,
+            "max_tokens": max_tokens,
             "system": system_prompt,
             "messages": [
                 {
@@ -564,29 +595,17 @@ impl AIClient {
             )));
         }
 
-        let data: AnthropicResponse = response.json().await?;
-        data.content
-            .first()
-            .map(|c| c.text.clone())
-            .ok_or_else(|| AppError::AIProvider("No response from Anthropic".to_string()))
+        let data: serde_json::Value = response.json().await?;
+        let token_usage = Self::parse_anthropic_usage(&data);
+        let content = data["content"][0]["text"]
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| AppError::AIProvider("No response from Anthropic".to_string()))?;
+
+        Ok(AIResponse { content, token_usage })
     }
 
-    async fn call_openrouter(&self, api_key: &str, model: &str, system_prompt: &str, user_prompt: &str) -> AppResult<String> {
-        #[derive(Deserialize)]
-        struct OpenRouterResponse {
-            choices: Vec<OpenRouterChoice>,
-        }
-
-        #[derive(Deserialize)]
-        struct OpenRouterChoice {
-            message: OpenRouterMessage,
-        }
-
-        #[derive(Deserialize)]
-        struct OpenRouterMessage {
-            content: String,
-        }
-
+    async fn call_openrouter(&self, api_key: &str, model: &str, system_prompt: &str, user_prompt: &str) -> AppResult<AIResponse> {
         // Trim API key to avoid authentication issues from whitespace
         let api_key_owned = api_key.trim().to_string();
 
@@ -622,34 +641,17 @@ impl AIClient {
             )));
         }
 
-        let data: OpenRouterResponse = response.json().await?;
-        data.choices
-            .first()
-            .map(|c| c.message.content.clone())
-            .ok_or_else(|| AppError::AIProvider("No response from OpenRouter".to_string()))
+        let data: serde_json::Value = response.json().await?;
+        let token_usage = Self::parse_openai_usage(&data);
+        let content = data["choices"][0]["message"]["content"]
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| AppError::AIProvider("No response from OpenRouter".to_string()))?;
+
+        Ok(AIResponse { content, token_usage })
     }
 
-    async fn call_google(&self, api_key: &str, model: &str, system_prompt: &str, user_prompt: &str) -> AppResult<String> {
-        #[derive(Deserialize)]
-        struct GoogleResponse {
-            candidates: Vec<GoogleCandidate>,
-        }
-
-        #[derive(Deserialize)]
-        struct GoogleCandidate {
-            content: GoogleContent,
-        }
-
-        #[derive(Deserialize)]
-        struct GoogleContent {
-            parts: Vec<GooglePart>,
-        }
-
-        #[derive(Deserialize)]
-        struct GooglePart {
-            text: String,
-        }
-
+    async fn call_google(&self, api_key: &str, model: &str, system_prompt: &str, user_prompt: &str) -> AppResult<AIResponse> {
         // Trim API key to avoid authentication issues from whitespace
         let api_key = api_key.trim();
 
@@ -688,25 +690,17 @@ impl AIClient {
             )));
         }
 
-        let data: GoogleResponse = response.json().await?;
-        data.candidates
-            .first()
-            .and_then(|c| c.content.parts.first())
-            .map(|p| p.text.clone())
-            .ok_or_else(|| AppError::AIProvider("No response from Google AI".to_string()))
+        let data: serde_json::Value = response.json().await?;
+        let token_usage = Self::parse_google_usage(&data);
+        let content = data["candidates"][0]["content"]["parts"][0]["text"]
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| AppError::AIProvider("No response from Google AI".to_string()))?;
+
+        Ok(AIResponse { content, token_usage })
     }
 
-    async fn call_ollama(&self, base_url: &str, model: &str, system_prompt: &str, user_prompt: &str) -> AppResult<String> {
-        #[derive(Deserialize)]
-        struct OllamaResponse {
-            message: OllamaMessage,
-        }
-
-        #[derive(Deserialize)]
-        struct OllamaMessage {
-            content: String,
-        }
-
+    async fn call_ollama(&self, base_url: &str, model: &str, system_prompt: &str, user_prompt: &str) -> AppResult<AIResponse> {
         let url = format!("{}/api/chat", base_url.trim_end_matches('/'));
 
         let body = serde_json::json!({
@@ -740,8 +734,23 @@ impl AIClient {
             )));
         }
 
-        let data: OllamaResponse = response.json().await?;
-        Ok(data.message.content)
+        let data: serde_json::Value = response.json().await?;
+        // Ollama returns usage in eval_count/prompt_eval_count
+        let token_usage = data.get("prompt_eval_count").and_then(|p| {
+            let prompt = p.as_u64()? as u32;
+            let completion = data.get("eval_count")?.as_u64()? as u32;
+            Some(TokenUsage {
+                prompt_tokens: prompt,
+                completion_tokens: completion,
+                total_tokens: prompt + completion,
+            })
+        });
+        let content = data["message"]["content"]
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| AppError::AIProvider("No response from Ollama".to_string()))?;
+
+        Ok(AIResponse { content, token_usage })
     }
 
     async fn call_openai_compatible(
@@ -751,22 +760,7 @@ impl AIClient {
         model: &str,
         system_prompt: &str,
         user_prompt: &str,
-    ) -> AppResult<String> {
-        #[derive(Deserialize)]
-        struct OpenAICompatResponse {
-            choices: Vec<OpenAICompatChoice>,
-        }
-
-        #[derive(Deserialize)]
-        struct OpenAICompatChoice {
-            message: OpenAICompatMessage,
-        }
-
-        #[derive(Deserialize)]
-        struct OpenAICompatMessage {
-            content: String,
-        }
-
+    ) -> AppResult<AIResponse> {
         let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
 
         let body = serde_json::json!({
@@ -804,11 +798,14 @@ impl AIClient {
             )));
         }
 
-        let data: OpenAICompatResponse = response.json().await?;
-        data.choices
-            .first()
-            .map(|c| c.message.content.clone())
-            .ok_or_else(|| AppError::AIProvider("No response from API".to_string()))
+        let data: serde_json::Value = response.json().await?;
+        let token_usage = Self::parse_openai_usage(&data);
+        let content = data["choices"][0]["message"]["content"]
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| AppError::AIProvider("No response from API".to_string()))?;
+
+        Ok(AIResponse { content, token_usage })
     }
 
     /// Fetch available models from a provider

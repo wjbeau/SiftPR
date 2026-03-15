@@ -68,6 +68,7 @@ pub struct GitHubBranch {
 
 /// Repo with open PR count for dashboard display
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct RepoWithPRCount {
     pub repo: GitHubRepo,
     pub open_pr_count: i64,
@@ -99,6 +100,7 @@ pub struct GitHubFile {
 
 /// Response from GitHub OAuth token endpoint
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct TokenResponse {
     access_token: String,
     token_type: Option<String>,

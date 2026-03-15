@@ -15,6 +15,7 @@ use super::{CodeExample, RepoContext};
 
 /// Token budget configuration for context retrieval
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct ContextBudget {
     /// Total token budget (~20k default)
     pub total_tokens: usize,

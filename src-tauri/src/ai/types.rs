@@ -23,6 +23,7 @@ impl DiagnosticLog {
         Self { entries: Vec::new() }
     }
 
+    #[allow(dead_code)]
     pub fn add(&mut self, agent: Option<&str>, event: &str, data: serde_json::Value) {
         // timestamp_ms will be set by SharedDiagnostics which tracks the start time
         self.entries.push(DiagnosticEntry {
@@ -262,17 +263,24 @@ pub struct OrchestratedAnalysis {
 }
 
 /// Raw response format expected from agents (for JSON parsing)
+/// All fields have `#[serde(default)]` so partial matches succeed.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RawAgentResponse {
+    #[serde(default)]
     pub summary: RawAgentSummary,
+    #[serde(default)]
     pub findings: Vec<RawAgentFinding>,
+    #[serde(default)]
     pub priority_files: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct RawAgentSummary {
+    #[serde(default)]
     pub overview: String,
+    #[serde(default)]
     pub risk_assessment: String,
+    #[serde(default)]
     pub top_concerns: Vec<String>,
 }
 
@@ -296,12 +304,17 @@ where
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RawAgentFinding {
+    #[serde(default)]
     pub file: String,
     #[serde(default, deserialize_with = "deserialize_line_number")]
     pub line: Option<u32>,
+    #[serde(default)]
     pub message: String,
+    #[serde(default)]
     pub severity: String,
+    #[serde(default)]
     pub category: String,
+    #[serde(default)]
     pub suggestion: Option<String>,
 }
 

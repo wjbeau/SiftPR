@@ -2,6 +2,7 @@ import { useState, useMemo } from "react";
 import { Link } from "react-router-dom";
 import { FileCode, Sparkles, AlertTriangle, FolderOpen, Files, Settings, Terminal } from "lucide-react";
 import { OrchestratedAnalysis, AgentType, LinkedRepo, GitHubPR } from "@/lib/api";
+import type { AgentProgress } from "@/contexts/AnalysisContext";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { AnalysisLoadingState } from "./AnalysisLoadingState";
@@ -14,6 +15,7 @@ export interface AIAnalyticsPanelProps {
   isAnalyzing: boolean;
   error: string | null;
   onRunAnalysis: () => void;
+  onCancelAnalysis?: () => void;
   linkedRepo: LinkedRepo | null | undefined;
   analysisMode: "pr_only" | "with_context";
   onSetAnalysisMode: (mode: "pr_only" | "with_context") => void;
@@ -21,9 +23,11 @@ export interface AIAnalyticsPanelProps {
   pr: GitHubPR | undefined;
   owner: string | undefined;
   repo: string | undefined;
+  agentProgress?: Record<string, AgentProgress>;
+  isGroupingFiles?: boolean;
 }
 
-export function AIAnalyticsPanel({ analysis, isAnalyzing, error, onRunAnalysis, linkedRepo, analysisMode, onSetAnalysisMode, lastAnalysisMode, pr, owner, repo }: AIAnalyticsPanelProps) {
+export function AIAnalyticsPanel({ analysis, isAnalyzing, error, onRunAnalysis, onCancelAnalysis, linkedRepo, analysisMode, onSetAnalysisMode, lastAnalysisMode, pr, owner, repo, agentProgress, isGroupingFiles }: AIAnalyticsPanelProps) {
   const [expandedAgents, setExpandedAgents] = useState<Set<AgentType>>(new Set());
   const [activeTab, setActiveTab] = useState<"analysis" | "diagnostics">("analysis");
 
@@ -148,7 +152,7 @@ export function AIAnalyticsPanel({ analysis, isAnalyzing, error, onRunAnalysis, 
 
   // Show loading state
   if (isAnalyzing) {
-    return <AnalysisLoadingState />;
+    return <AnalysisLoadingState agentProgress={agentProgress} isGroupingFiles={isGroupingFiles} onCancel={onCancelAnalysis} />;
   }
 
   // Show analysis results

@@ -1,25 +1,27 @@
 //! MCP client for managing server connections and tool execution
 
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 
 use serde_json::json;
 
 use super::transport::{HttpTransport, MCPTransport, StdioTransport};
 use super::{
-    InitializeResult, JsonRpcRequest, MCPTool, ToolCallContent, ToolCallResult, ToolsListResult,
+    InitializeResult, JsonRpcRequest, MCPTool, ToolCallResult, ToolsListResult,
 };
 use crate::ai::tools::{ToolDefinition, ToolResult, ToolSource};
 use crate::db::MCPServerConfig;
 use crate::error::{AppError, AppResult};
 
 /// Connected MCP server instance
+#[allow(dead_code)]
 struct MCPConnection {
     config: MCPServerConfig,
     transport: Box<dyn MCPTransport>,
     tools: Vec<MCPTool>,
     initialized: bool,
 }
+
 
 /// Manager for MCP server connections
 pub struct MCPManager {
@@ -34,6 +36,7 @@ impl MCPManager {
     }
 
     /// Connect to an MCP server and discover its tools
+    #[allow(dead_code)]
     pub fn connect(&self, config: &MCPServerConfig) -> AppResult<Vec<MCPTool>> {
         // Create transport based on type
         let transport: Box<dyn MCPTransport> = match config.transport_type.as_str() {
@@ -131,6 +134,7 @@ impl MCPManager {
     }
 
     /// Disconnect from an MCP server
+    #[allow(dead_code)]
     pub fn disconnect(&self, agent_type: &str, server_name: &str) -> AppResult<()> {
         let connection_key = format!("{}:{}", agent_type, server_name);
 
@@ -147,6 +151,7 @@ impl MCPManager {
     }
 
     /// Disconnect all servers
+    #[allow(dead_code)]
     pub fn disconnect_all(&self) -> AppResult<()> {
         let mut connections = self.connections.write().map_err(|_| {
             AppError::MCP("Failed to lock connections".to_string())

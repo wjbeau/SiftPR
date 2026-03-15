@@ -20,7 +20,7 @@ use crate::github::GitHubFile;
 
 use super::prompts::{build_agent_prompt, get_system_prompt};
 use super::tools::{ToolContext, ToolDefinition, ToolExecutionConfig};
-use super::types::{AgentFinding, AgentResponse, AgentSummary, AgentType, RawAgentResponse};
+use super::types::{AgentResponse, AgentSummary, AgentType, RawAgentResponse};
 
 /// A code example retrieved from the codebase for context
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,11 +108,13 @@ pub struct PreAnalysisResults {
     /// Findings from static analysis tools
     pub static_analysis_findings: Vec<StaticAnalysisFinding>,
     /// Any warnings or notes from the pre-analysis phase
+    #[allow(dead_code)]
     pub notes: Vec<String>,
 }
 
 /// A finding from a static analysis tool
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct StaticAnalysisFinding {
     pub tool: String,
     pub file: String,
@@ -156,6 +158,7 @@ impl RepoContext {
 
 /// Execution configuration for an agent
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct AgentExecutionConfig {
     /// Whether tools are enabled for this agent
     pub use_tools: bool,
@@ -670,6 +673,7 @@ impl PipelineRegistry {
     }
 
     /// Register a custom pipeline
+    #[allow(dead_code)]
     pub fn register(&mut self, pipeline: Box<dyn AgentPipeline>) {
         self.pipelines.insert(pipeline.agent_type(), pipeline);
     }

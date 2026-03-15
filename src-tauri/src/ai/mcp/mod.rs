@@ -39,6 +39,7 @@ impl JsonRpcRequest {
 
 /// JSON-RPC 2.0 response
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct JsonRpcResponse {
     pub jsonrpc: String,
     pub id: Option<u64>,
@@ -48,6 +49,7 @@ pub struct JsonRpcResponse {
 
 /// JSON-RPC 2.0 error
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 pub struct JsonRpcError {
     pub code: i32,
     pub message: String,
@@ -62,6 +64,7 @@ impl std::fmt::Display for JsonRpcError {
 
 /// MCP initialize result
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct InitializeResult {
     #[serde(rename = "protocolVersion")]
     pub protocol_version: String,
@@ -71,6 +74,7 @@ pub struct InitializeResult {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct ServerCapabilities {
     pub tools: Option<serde_json::Value>,
     pub prompts: Option<serde_json::Value>,
@@ -78,6 +82,7 @@ pub struct ServerCapabilities {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct ServerInfo {
     pub name: String,
     pub version: Option<String>,
@@ -98,6 +103,7 @@ pub struct ToolCallResult {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct ToolCallContent {
     #[serde(rename = "type")]
     pub content_type: String,

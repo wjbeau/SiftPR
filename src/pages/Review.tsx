@@ -31,7 +31,7 @@ export function Review() {
     pr, files, filesSinceReview, linkedRepo,
     isLoading,
     isAnalyzing, analysis, analysisError, analysisMode, lastAnalysisMode,
-    setAnalysisMode, runAnalysis, selectedFileAnalysis,
+    setAnalysisMode, runAnalysis, cancelAnalysis, agentProgress, isGroupingFiles, selectedFileAnalysis,
     selectedFile, setSelectedFile, viewedFiles, toggleFileViewed,
     viewMode, setViewMode, displayFiles,
     hasReviewedBefore, hasNewChanges,
@@ -112,6 +112,7 @@ export function Review() {
                 isAnalyzing={isAnalyzing}
                 error={analysisError}
                 onRunAnalysis={runAnalysis}
+                onCancelAnalysis={cancelAnalysis}
                 linkedRepo={linkedRepo}
                 analysisMode={analysisMode}
                 onSetAnalysisMode={setAnalysisMode}
@@ -119,6 +120,8 @@ export function Review() {
                 pr={pr}
                 owner={owner}
                 repo={repo}
+                agentProgress={agentProgress}
+                isGroupingFiles={isGroupingFiles}
               />
             </div>
           ) : (

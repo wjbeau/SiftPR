@@ -22,6 +22,7 @@ struct ResearchArgs {
 }
 
 #[derive(Debug, Serialize)]
+#[allow(dead_code)]
 struct ResearchSource {
     file: String,
     relevance: String,
@@ -29,6 +30,7 @@ struct ResearchSource {
 }
 
 #[derive(Debug, Serialize)]
+#[allow(dead_code)]
 struct ResearchOutput {
     answer: String,
     confidence: f32,

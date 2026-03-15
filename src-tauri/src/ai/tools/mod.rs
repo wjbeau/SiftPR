@@ -101,6 +101,7 @@ impl Default for ToolExecutionConfig {
 }
 
 /// Message types for the conversation with tools
+#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "role")]
 pub enum Message {
@@ -148,6 +149,4 @@ pub struct ToolContext {
 }
 
 // Re-export commonly used types
-pub use builtin::BuiltinTool;
 pub use executor::ToolExecutor;
-pub use formatter::ToolFormatter;

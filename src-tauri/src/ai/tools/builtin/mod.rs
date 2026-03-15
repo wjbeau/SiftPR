@@ -82,6 +82,13 @@ impl BuiltinToolRegistry {
     }
 }
 
+impl BuiltinToolRegistry {
+    /// Create a new registry with the same tools (for parallel execution)
+    pub fn clone_registry(&self) -> Self {
+        Self::new()
+    }
+}
+
 impl Default for BuiltinToolRegistry {
     fn default() -> Self {
         Self::new()
