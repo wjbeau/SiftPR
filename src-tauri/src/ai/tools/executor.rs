@@ -111,9 +111,24 @@ impl ToolExecutor {
             self.diag_log("tools_fallback", serde_json::json!({
                 "reason": "no_tools_available",
             }));
+            self.diag_log("llm_request", serde_json::json!({
+                "iteration": 0,
+                "provider": provider,
+                "model": model,
+                "system_prompt_len": system_prompt.len(),
+                "system_prompt_preview": system_prompt.chars().take(500).collect::<String>(),
+                "user_message_len": initial_message.len(),
+                "user_message_preview": initial_message.chars().take(500).collect::<String>(),
+                "note": "no-tools fallback, using call_with_system",
+            }));
             let response = client
                 .call_with_system(provider, api_key, model, system_prompt, initial_message)
                 .await?;
+            self.diag_log("llm_response", serde_json::json!({
+                "response_len": response.len(),
+                "has_tool_calls": false,
+                "response_preview": response.chars().take(1000).collect::<String>(),
+            }));
             return Ok(ExecutionResult {
                 response,
                 tool_calls_made: 0,
@@ -162,6 +177,19 @@ impl ToolExecutor {
                 "iteration": iterations + 1,
                 "provider": provider,
                 "model": model,
+                "system_prompt_len": system_prompt.len(),
+                "system_prompt_preview": system_prompt.chars().take(500).collect::<String>(),
+                "message_count": messages.len(),
+                "messages": messages.iter().map(|m| {
+                    let content_str = m.get("content")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("");
+                    serde_json::json!({
+                        "role": m.get("role").and_then(|r| r.as_str()).unwrap_or("unknown"),
+                        "content_len": content_str.len(),
+                        "content_preview": content_str.chars().take(500).collect::<String>(),
+                    })
+                }).collect::<Vec<_>>(),
             }));
 
             let response = client
@@ -178,7 +206,8 @@ impl ToolExecutor {
                 self.diag_log("llm_response", serde_json::json!({
                     "response_len": final_response.len(),
                     "has_tool_calls": false,
-                    "response_preview": final_response.chars().take(300).collect::<String>(),
+                    "response_preview": final_response.chars().take(1000).collect::<String>(),
+                    "raw_response": truncate_json(&response, 2000),
                 }));
 
                 return Ok(ExecutionResult {
@@ -188,6 +217,11 @@ impl ToolExecutor {
                     total_time_ms: start_time.elapsed().as_millis() as u64,
                 });
             }
+
+            self.diag_log("llm_response", serde_json::json!({
+                "has_tool_calls": true,
+                "raw_response": truncate_json(&response, 2000),
+            }));
 
             // Parse tool calls
             let tool_calls = formatter.parse_tool_calls(&response);
@@ -399,6 +433,16 @@ impl Default for ToolExecutor {
     }
 }
 
+
+/// Truncate a JSON value's string representation to a max length for diagnostics
+fn truncate_json(value: &serde_json::Value, max_len: usize) -> serde_json::Value {
+    let s = value.to_string();
+    if s.len() <= max_len {
+        value.clone()
+    } else {
+        serde_json::Value::String(format!("{}...[truncated, {} total chars]", &s[..max_len], s.len()))
+    }
+}
 
 /// Result of executing an agent with tools
 #[derive(Debug)]
