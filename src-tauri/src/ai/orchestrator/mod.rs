@@ -12,7 +12,7 @@ use crate::github::GitHubFile;
 use super::client::AIClient;
 use super::events::AnalysisEvent;
 use super::pipeline::{PipelineRegistry, RepoContext};
-use super::prompts::{build_agent_prompt_for_model, build_files_context, build_grouping_prompt, get_system_prompt};
+use super::prompts::{build_agent_prompt_for_model, build_files_context, build_grouping_prompt, build_triaged_files_context, get_system_prompt, get_tool_instructions, FileSummary};
 use super::tools::{ToolContext, ToolExecutionConfig, ToolExecutor};
 use super::types::{
     AgentResponse, AgentSummary, AgentType, AnnotationType, DiagnosticLog, FailedAgent,
@@ -28,6 +28,7 @@ pub(super) const AGENT_WITH_TOOLS_TIMEOUT_SECS: u64 = 300; // 5 minutes when usi
 mod agent_runner;
 mod aggregator;
 mod file_grouping;
+mod triage;
 
 /// Configuration for a single analysis agent
 #[derive(Debug, Clone)]
@@ -156,6 +157,7 @@ impl Orchestrator {
         let use_pipelines_flag = codebase_context.is_some()
             && tool_config.as_ref().map(|tc| tc.repo_path.is_some()).unwrap_or(false);
         let any_tools = tool_config.is_some();
+        let use_triage = files.len() >= triage::TRIAGE_FILE_THRESHOLD;
 
         diag.log(None, "analysis_start", serde_json::json!({
             "provider": provider,
@@ -163,6 +165,7 @@ impl Orchestrator {
             "file_count": files.len(),
             "use_pipelines": use_pipelines_flag,
             "has_tool_config": any_tools,
+            "use_triage": use_triage,
         }));
         emit(AnalysisEvent::AnalysisStarted { agent_count: 4 });
 
@@ -264,6 +267,94 @@ impl Orchestrator {
                     &files_context,
                     codebase_context,
                     &repo_context,
+                    tool_config_ref,
+                    &diag,
+                    &event_emitter,
+                ),
+            )
+        } else if use_triage {
+            // Build per-agent triaged file contexts for large PRs
+            let triaged = triage::triage_files(files);
+            let build_context = |agent_type: AgentType| -> String {
+                if let Some(t) = triaged.get(&agent_type) {
+                    if t.primary.is_empty() {
+                        // Fallback: send all files if triage found nothing relevant
+                        files_context.clone()
+                    } else {
+                        let summaries: Vec<FileSummary<'_>> = t.secondary.iter().map(|f| FileSummary {
+                            filename: &f.filename,
+                            status: &f.status,
+                            additions: f.additions,
+                            deletions: f.deletions,
+                        }).collect();
+                        build_triaged_files_context(&t.primary, &summaries)
+                    }
+                } else {
+                    files_context.clone()
+                }
+            };
+
+            let security_files = build_context(AgentType::Security);
+            let architecture_files = build_context(AgentType::Architecture);
+            let style_files = build_context(AgentType::Style);
+            let performance_files = build_context(AgentType::Performance);
+
+            diag.log(None, "triage_applied", serde_json::json!({
+                "security_primary": triaged.get(&AgentType::Security).map(|t| t.primary.len()),
+                "architecture_primary": triaged.get(&AgentType::Architecture).map(|t| t.primary.len()),
+                "style_primary": triaged.get(&AgentType::Style).map(|t| t.primary.len()),
+                "performance_primary": triaged.get(&AgentType::Performance).map(|t| t.primary.len()),
+            }));
+
+            tokio::join!(
+                self.run_agent_if_enabled(
+                    &security_config,
+                    provider,
+                    api_key,
+                    default_model,
+                    pr_title,
+                    pr_body,
+                    &security_files,
+                    codebase_context,
+                    tool_config_ref,
+                    &diag,
+                    &event_emitter,
+                ),
+                self.run_agent_if_enabled(
+                    &architecture_config,
+                    provider,
+                    api_key,
+                    default_model,
+                    pr_title,
+                    pr_body,
+                    &architecture_files,
+                    codebase_context,
+                    tool_config_ref,
+                    &diag,
+                    &event_emitter,
+                ),
+                self.run_agent_if_enabled(
+                    &style_config,
+                    provider,
+                    api_key,
+                    default_model,
+                    pr_title,
+                    pr_body,
+                    &style_files,
+                    codebase_context,
+                    tool_config_ref,
+                    &diag,
+                    &event_emitter,
+                ),
+                self.run_agent_if_enabled(
+                    &performance_config,
+                    provider,
+                    api_key,
+                    default_model,
+                    pr_title,
+                    pr_body,
+                    &performance_files,
+                    codebase_context,
                     tool_config_ref,
                     &diag,
                     &event_emitter,

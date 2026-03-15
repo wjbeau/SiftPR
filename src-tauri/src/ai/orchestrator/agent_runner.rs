@@ -282,22 +282,9 @@ impl Orchestrator {
         let default_prompt = get_system_prompt(agent_type);
         let base_system_prompt = custom_system_prompt.unwrap_or(default_prompt);
 
-        // Enhance system prompt with tool instructions
-        let system_prompt = format!(
-            "{}\n\n## Available Tools\n\
-            You have access to the following tools to investigate the codebase:\n\
-            - `search_repo`: Search for patterns in the codebase using regex\n\
-            - `read_file`: Read the contents of specific files\n\n\
-            ## IMPORTANT: Tool Usage Requirements\n\
-            You MUST use tools before providing your final analysis. Specifically:\n\
-            1. For each significant finding, use `search_repo` or `read_file` to verify how \
-               the affected code is used elsewhere in the codebase\n\
-            2. Check related files to understand the full context of changes\n\
-            3. Look for existing patterns that the PR should follow or is breaking\n\n\
-            Do NOT skip tool calls and guess — investigate first, then analyze.\n\
-            After using tools, provide your final analysis in the expected JSON format.",
-            base_system_prompt
-        );
+        // Enhance system prompt with agent-specific tool instructions
+        let tool_instructions = get_tool_instructions(agent_type);
+        let system_prompt = format!("{}\n\n{}", base_system_prompt, tool_instructions);
 
         let user_prompt = build_agent_prompt_for_model(
             agent_type,
@@ -542,22 +529,9 @@ impl Orchestrator {
         let base_system_prompt = pipeline.build_system_prompt(&agent_context);
         let user_prompt = pipeline.build_user_prompt(pr_title, pr_body, files_context, &agent_context);
 
-        // Enhance system prompt with tool instructions
-        let system_prompt = format!(
-            "{}\n\n## Available Tools\n\
-            You have access to the following tools to investigate the codebase:\n\
-            - `search_repo`: Search for patterns in the codebase using regex\n\
-            - `read_file`: Read the contents of specific files\n\n\
-            ## IMPORTANT: Tool Usage Requirements\n\
-            You MUST use tools before providing your final analysis. Specifically:\n\
-            1. For each significant finding, use `search_repo` or `read_file` to verify how \
-               the affected code is used elsewhere in the codebase\n\
-            2. Check related files to understand the full context of changes\n\
-            3. Look for existing patterns that the PR should follow or is breaking\n\n\
-            Do NOT skip tool calls and guess — investigate first, then analyze.\n\
-            After using tools, provide your final analysis in the expected JSON format.",
-            base_system_prompt
-        );
+        // Enhance system prompt with agent-specific tool instructions
+        let tool_instructions = get_tool_instructions(agent_type);
+        let system_prompt = format!("{}\n\n{}", base_system_prompt, tool_instructions);
 
         diag.log(Some(agent_name), "prompt_built", serde_json::json!({
             "system_prompt_len": system_prompt.len(),

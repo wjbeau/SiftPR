@@ -326,6 +326,142 @@ Example finding:
     }
 }
 
+/// Get agent-specific tool-use instructions
+pub fn get_tool_instructions(agent_type: AgentType) -> &'static str {
+    match agent_type {
+        AgentType::Security => SECURITY_TOOL_INSTRUCTIONS,
+        AgentType::Architecture => ARCHITECTURE_TOOL_INSTRUCTIONS,
+        AgentType::Style => STYLE_TOOL_INSTRUCTIONS,
+        AgentType::Performance => PERFORMANCE_TOOL_INSTRUCTIONS,
+        _ => GENERIC_TOOL_INSTRUCTIONS,
+    }
+}
+
+const SECURITY_TOOL_INSTRUCTIONS: &str = r#"## Available Tools
+You have access to the following tools to investigate the codebase:
+- `search_repo`: Search for patterns in the codebase using regex
+- `read_file`: Read the contents of specific files
+
+## Tool Usage Strategy (Security)
+You MUST use tools before providing your final analysis. Prioritize these investigation patterns:
+1. **Trace data flow from user inputs**: When you see external input (request params, form data, file uploads), use `search_repo` to trace how it flows through the codebase. Look for sanitization, validation, or direct use in dangerous sinks (SQL, shell, eval, innerHTML).
+2. **Check for upstream validation**: Before flagging missing validation, search for middleware, decorators, or shared validators that may handle it before the code you're reviewing.
+3. **Scan for secrets and credentials**: Search for hardcoded tokens, API keys, passwords, or connection strings. Check `.env` usage patterns and whether secrets are properly externalized.
+4. **Verify access control**: When reviewing endpoints or handlers, read the route definitions and middleware chain to confirm authentication and authorization are enforced.
+
+Do NOT skip tool calls and guess — investigate first, then analyze.
+After using tools, provide your final analysis in the expected JSON format."#;
+
+const ARCHITECTURE_TOOL_INSTRUCTIONS: &str = r#"## Available Tools
+You have access to the following tools to investigate the codebase:
+- `search_repo`: Search for patterns in the codebase using regex
+- `read_file`: Read the contents of specific files
+
+## Tool Usage Strategy (Architecture)
+You MUST use tools before providing your final analysis. Prioritize these investigation patterns:
+1. **Read interfaces and traits being implemented**: When a file implements an interface or trait, read the definition to verify the contract is honored and understand the abstraction boundary.
+2. **Check sibling modules**: Read files in the same directory or module to understand naming conventions, patterns, and how the changed code fits into the existing structure.
+3. **Assess blast radius of API changes**: When public APIs, types, or function signatures change, use `search_repo` to find all call sites and dependents that may be affected.
+4. **Verify dependency flow**: Check imports to confirm dependencies flow in the expected direction (e.g., domain doesn't import from infrastructure, UI doesn't import from data layer).
+
+Do NOT skip tool calls and guess — investigate first, then analyze.
+After using tools, provide your final analysis in the expected JSON format."#;
+
+const STYLE_TOOL_INSTRUCTIONS: &str = r#"## Available Tools
+You have access to the following tools to investigate the codebase:
+- `search_repo`: Search for patterns in the codebase using regex
+- `read_file`: Read the contents of specific files
+
+## Tool Usage Strategy (Style)
+You MUST use tools before providing your final analysis. Prioritize these investigation patterns:
+1. **Read neighboring files for conventions**: Before flagging naming or formatting issues, read 2-3 nearby files to understand what conventions THIS codebase actually follows — don't assume external standards.
+2. **Check naming patterns**: Use `search_repo` to see how similar constructs (functions, types, constants) are named elsewhere. Flag deviations from the codebase's own patterns, not generic best practices.
+3. **Verify documentation norms**: Check whether similar functions/modules have doc comments. Only flag missing docs if the codebase consistently documents similar constructs.
+4. **Look for existing utilities**: Before flagging code duplication, search for existing helpers or utilities that the new code could reuse.
+
+Do NOT skip tool calls and guess — investigate first, then analyze.
+After using tools, provide your final analysis in the expected JSON format."#;
+
+const PERFORMANCE_TOOL_INSTRUCTIONS: &str = r#"## Available Tools
+You have access to the following tools to investigate the codebase:
+- `search_repo`: Search for patterns in the codebase using regex
+- `read_file`: Read the contents of specific files
+
+## Tool Usage Strategy (Performance)
+You MUST use tools before providing your final analysis. Prioritize these investigation patterns:
+1. **Trace call sites for hot paths**: Use `search_repo` to find where changed functions are called from. A slow function called once at startup matters less than one called per request or in a loop.
+2. **Check for existing caching or batching**: Before suggesting optimization, search for existing cache layers, memoization, or batch processing that may already mitigate the concern.
+3. **Detect N+1 patterns**: When you see database queries or API calls inside loops, read the surrounding code to confirm whether batching or eager loading is already in place.
+4. **Verify async/blocking patterns**: When async code calls potentially blocking operations, check whether the codebase uses spawn_blocking, task offloading, or other patterns to handle this.
+
+Do NOT skip tool calls and guess — investigate first, then analyze.
+After using tools, provide your final analysis in the expected JSON format."#;
+
+const GENERIC_TOOL_INSTRUCTIONS: &str = r#"## Available Tools
+You have access to the following tools to investigate the codebase:
+- `search_repo`: Search for patterns in the codebase using regex
+- `read_file`: Read the contents of specific files
+
+## IMPORTANT: Tool Usage Requirements
+You MUST use tools before providing your final analysis. Specifically:
+1. For each significant finding, use `search_repo` or `read_file` to verify how the affected code is used elsewhere in the codebase
+2. Check related files to understand the full context of changes
+3. Look for existing patterns that the PR should follow or is breaking
+
+Do NOT skip tool calls and guess — investigate first, then analyze.
+After using tools, provide your final analysis in the expected JSON format."#;
+
+/// Summary of a file for secondary (low-relevance) triage context
+pub struct FileSummary<'a> {
+    pub filename: &'a str,
+    pub status: &'a str,
+    pub additions: i64,
+    pub deletions: i64,
+}
+
+/// Build agent-specific file context with primary (full diff) and secondary (summary) files
+pub fn build_triaged_files_context(
+    primary: &[&crate::github::GitHubFile],
+    secondary: &[FileSummary<'_>],
+) -> String {
+    let mut parts = Vec::new();
+
+    if !primary.is_empty() {
+        let primary_context: String = primary
+            .iter()
+            .map(|f| {
+                format!(
+                    "### {} ({}, +{} -{})\n{}",
+                    f.filename,
+                    f.status,
+                    f.additions,
+                    f.deletions,
+                    f.patch
+                        .as_ref()
+                        .map(|p| format!("```diff\n{}\n```", truncate_patch(p, 500)))
+                        .unwrap_or_else(|| "(no diff available)".to_string())
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        parts.push(primary_context);
+    }
+
+    if !secondary.is_empty() {
+        let secondary_list: String = secondary
+            .iter()
+            .map(|f| format!("- {} ({}, +{} -{})", f.filename, f.status, f.additions, f.deletions))
+            .collect::<Vec<_>>()
+            .join("\n");
+        parts.push(format!(
+            "### Other Changed Files (less likely relevant to your domain)\n{}",
+            secondary_list
+        ));
+    }
+
+    parts.join("\n\n")
+}
+
 /// Build a prompt for grouping files by functional area
 pub fn build_grouping_prompt(
     files: &[crate::github::GitHubFile],
