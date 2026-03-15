@@ -70,6 +70,17 @@ impl AIClient {
     where
         F: Fn() -> reqwest::RequestBuilder,
     {
+        self.send_with_retry_diag(build_request, None).await
+    }
+
+    async fn send_with_retry_diag<F>(
+        &self,
+        build_request: F,
+        _diag: Option<(&super::types::SharedDiagnostics, &str)>,
+    ) -> Result<reqwest::Response, reqwest::Error>
+    where
+        F: Fn() -> reqwest::RequestBuilder,
+    {
         let max_retries = 2u32;
         let mut last_response = build_request().send().await?;
 
@@ -79,7 +90,8 @@ impl AIClient {
                 return Ok(last_response);
             }
 
-            let delay = std::time::Duration::from_secs(1 << attempt);
+            let delay_ms = (1u64 << attempt) * 1000;
+            let delay = std::time::Duration::from_millis(delay_ms);
             println!(
                 "[AIClient] Retrying after {} error (attempt {}/{}), waiting {:?}",
                 status,
@@ -87,6 +99,13 @@ impl AIClient {
                 max_retries,
                 delay
             );
+            if let Some((diag, agent)) = &_diag {
+                diag.log(Some(agent), "retry", serde_json::json!({
+                    "status_code": status,
+                    "attempt": attempt + 1,
+                    "delay_ms": delay_ms,
+                }));
+            }
             tokio::time::sleep(delay).await;
             last_response = build_request().send().await?;
         }

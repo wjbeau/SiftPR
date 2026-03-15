@@ -16,6 +16,7 @@ use super::formatter::{get_formatter, ToolFormatter};
 use super::{ToolCall, ToolContext, ToolDefinition, ToolExecutionConfig, ToolResult};
 use crate::ai::client::AIClient;
 use crate::ai::mcp::MCPManager;
+use crate::ai::types::SharedDiagnostics;
 use crate::error::{AppError, AppResult};
 
 /// Executes tools for an AI agent in an iterative loop
@@ -24,6 +25,8 @@ pub struct ToolExecutor {
     config: ToolExecutionConfig,
     mcp_manager: Option<Arc<MCPManager>>,
     agent_type: Option<String>,
+    diagnostics: Option<SharedDiagnostics>,
+    diag_agent: Option<String>,
 }
 
 impl ToolExecutor {
@@ -33,6 +36,8 @@ impl ToolExecutor {
             config,
             mcp_manager: None,
             agent_type: None,
+            diagnostics: None,
+            diag_agent: None,
         }
     }
 
@@ -45,6 +50,19 @@ impl ToolExecutor {
         self.mcp_manager = Some(mcp_manager);
         self.agent_type = Some(agent_type.to_string());
         self
+    }
+
+    /// Attach diagnostics for logging tool execution events
+    pub fn with_diagnostics(mut self, diag: SharedDiagnostics, agent_name: &str) -> Self {
+        self.diagnostics = Some(diag);
+        self.diag_agent = Some(agent_name.to_string());
+        self
+    }
+
+    fn diag_log(&self, event: &str, data: serde_json::Value) {
+        if let Some(diag) = &self.diagnostics {
+            diag.log(self.diag_agent.as_deref(), event, data);
+        }
     }
 
     /// Get available tools for the given context (builtin + MCP)
@@ -82,8 +100,17 @@ impl ToolExecutor {
         let formatter = get_formatter(provider);
         let available_tools = self.get_available_tools(context);
 
+        let tool_names: Vec<&str> = available_tools.iter().map(|t| t.name.as_str()).collect();
+        self.diag_log("tools_available", serde_json::json!({
+            "tool_count": available_tools.len(),
+            "tool_names": tool_names,
+        }));
+
         if available_tools.is_empty() {
             // No tools available, fall back to regular call
+            self.diag_log("tools_fallback", serde_json::json!({
+                "reason": "no_tools_available",
+            }));
             let response = client
                 .call_with_system(provider, api_key, model, system_prompt, initial_message)
                 .await?;
@@ -131,6 +158,12 @@ impl ToolExecutor {
             }
 
             // Make API call with tools
+            self.diag_log("llm_request", serde_json::json!({
+                "iteration": iterations + 1,
+                "provider": provider,
+                "model": model,
+            }));
+
             let response = client
                 .call_with_tools(provider, api_key, model, system_prompt, &messages, &tools_json)
                 .await?;
@@ -141,6 +174,12 @@ impl ToolExecutor {
                 let final_response = formatter
                     .extract_final_response(&response)
                     .ok_or_else(|| AppError::AIProvider("No response content".to_string()))?;
+
+                self.diag_log("llm_response", serde_json::json!({
+                    "response_len": final_response.len(),
+                    "has_tool_calls": false,
+                    "response_preview": final_response.chars().take(300).collect::<String>(),
+                }));
 
                 return Ok(ExecutionResult {
                     response: final_response,
@@ -161,16 +200,33 @@ impl ToolExecutor {
                 call_count
             );
 
+            self.diag_log("tool_calls", serde_json::json!({
+                "iteration": iterations + 1,
+                "calls": tool_calls.iter().map(|tc| serde_json::json!({
+                    "name": tc.name,
+                    "arguments": tc.arguments,
+                })).collect::<Vec<_>>(),
+            }));
+
             // Execute each tool call
             let mut results = Vec::new();
             for call in &tool_calls {
+                let tool_start = Instant::now();
                 let result = self
                     .execute_single_tool(call, context)
                     .await;
+                let tool_duration_ms = tool_start.elapsed().as_millis() as u64;
                 println!(
                     "[ToolExecutor] Tool {} result: success={}",
                     call.name, result.success
                 );
+                self.diag_log("tool_result", serde_json::json!({
+                    "tool_name": call.name,
+                    "success": result.success,
+                    "output_len": result.output.len(),
+                    "duration_ms": tool_duration_ms,
+                    "error": result.error,
+                }));
                 results.push(result);
             }
 
@@ -342,6 +398,7 @@ impl Default for ToolExecutor {
         Self::with_default_config()
     }
 }
+
 
 /// Result of executing an agent with tools
 #[derive(Debug)]

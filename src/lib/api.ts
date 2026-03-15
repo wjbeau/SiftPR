@@ -185,6 +185,17 @@ export interface GroupedFile {
   reason: string | null;
 }
 
+export interface DiagnosticEntry {
+  timestamp_ms: number;
+  agent: string | null;
+  event: string;
+  data: Record<string, unknown>;
+}
+
+export interface DiagnosticLog {
+  entries: DiagnosticEntry[];
+}
+
 export interface OrchestratedAnalysis {
   summary: string;
   risk_level: string;
@@ -198,6 +209,7 @@ export interface OrchestratedAnalysis {
   total_processing_time_ms: number;
   total_token_usage: TokenUsage;
   file_groups?: FileGroup[];
+  diagnostics?: DiagnosticLog;
 }
 
 // Auth API

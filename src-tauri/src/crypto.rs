@@ -1,39 +1,60 @@
 //! Cryptographic utilities for secure data storage
 //!
 //! This module handles encryption/decryption of sensitive data (API keys, tokens)
-//! using AES-256-GCM with a key stored in the system keyring.
+//! using AES-256-GCM with a key stored in a file in the app data directory.
 
 use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
-use keyring::Entry;
 use rand::Rng;
+use std::path::PathBuf;
 
 use crate::error::{AppError, AppResult};
 
 const NONCE_SIZE: usize = 12;
-const SERVICE_NAME: &str = "siftpr";
-const KEY_NAME: &str = "encryption-key";
 
 /// Legacy key material for migration purposes only.
 /// This was the old insecure key - kept only to decrypt existing data.
 /// NOTE: This must match the ORIGINAL key that was used to encrypt existing data.
 const LEGACY_KEY_MATERIAL: &str = "reviewboss-encryption-key-v1";
 
-/// Get the encryption key from the system keyring.
-/// If no key exists, generate a new one and store it.
-fn get_encryption_key() -> AppResult<[u8; 32]> {
-    let entry = Entry::new(SERVICE_NAME, KEY_NAME)
-        .map_err(|e| AppError::Encryption(format!("Failed to access keyring: {}", e)))?;
+/// Get the path to the encryption key file in the app data directory.
+fn key_file_path() -> AppResult<PathBuf> {
+    let data_dir = dirs::data_dir()
+        .ok_or_else(|| AppError::Encryption("Cannot find data directory".into()))?;
+    Ok(data_dir.join("SiftPR").join("encryption.key"))
+}
 
-    // Try to get existing key
-    match entry.get_password() {
+/// Write the key to the key file with restricted permissions.
+fn write_key_file(path: &PathBuf, key: &[u8; 32]) -> AppResult<()> {
+    let key_b64 = STANDARD.encode(key);
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| AppError::Encryption(format!("Failed to create key directory: {}", e)))?;
+    }
+
+    std::fs::write(path, key_b64.as_bytes())
+        .map_err(|e| AppError::Encryption(format!("Failed to write key file: {}", e)))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| AppError::Encryption(format!("Failed to set key file permissions: {}", e)))?;
+    }
+
+    Ok(())
+}
+
+/// Read the key from the key file.
+fn read_key_file(path: &PathBuf) -> AppResult<Option<[u8; 32]>> {
+    match std::fs::read_to_string(path) {
         Ok(key_b64) => {
-            // Decode the base64 key
             let key_bytes = STANDARD
-                .decode(&key_b64)
+                .decode(key_b64.trim())
                 .map_err(|e| AppError::Encryption(format!("Invalid key format: {}", e)))?;
 
             if key_bytes.len() != 32 {
@@ -42,23 +63,27 @@ fn get_encryption_key() -> AppResult<[u8; 32]> {
 
             let mut key = [0u8; 32];
             key.copy_from_slice(&key_bytes);
-            Ok(key)
+            Ok(Some(key))
         }
-        Err(keyring::Error::NoEntry) => {
-            // No key exists, generate a new one
-            let mut key = [0u8; 32];
-            rand::thread_rng().fill(&mut key);
-
-            // Store the key in the keyring
-            let key_b64 = STANDARD.encode(&key);
-            entry
-                .set_password(&key_b64)
-                .map_err(|e| AppError::Encryption(format!("Failed to store key: {}", e)))?;
-
-            Ok(key)
-        }
-        Err(e) => Err(AppError::Encryption(format!("Keyring error: {}", e))),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(AppError::Encryption(format!("Failed to read key file: {}", e))),
     }
+}
+
+/// Get the encryption key from a file in the app data directory.
+/// If no key exists, generates a new one.
+fn get_encryption_key() -> AppResult<[u8; 32]> {
+    let path = key_file_path()?;
+
+    if let Some(key) = read_key_file(&path)? {
+        return Ok(key);
+    }
+
+    let mut key = [0u8; 32];
+    rand::thread_rng().fill(&mut key);
+    write_key_file(&path, &key)?;
+
+    Ok(key)
 }
 
 /// Get the legacy encryption key (for migration only).
@@ -71,7 +96,7 @@ fn get_legacy_key() -> [u8; 32] {
     key
 }
 
-/// Encrypt a string value using the secure keyring key
+/// Encrypt a string value using the secure key
 pub fn encrypt(plaintext: &str) -> AppResult<String> {
     let key = get_encryption_key()?;
     let cipher = Aes256Gcm::new_from_slice(&key)
@@ -93,7 +118,7 @@ pub fn encrypt(plaintext: &str) -> AppResult<String> {
     Ok(STANDARD.encode(&combined))
 }
 
-/// Decrypt a string value using the secure keyring key.
+/// Decrypt a string value using the secure key.
 /// Falls back to legacy key for migration if decryption fails.
 pub fn decrypt(encrypted: &str) -> AppResult<String> {
     let combined = STANDARD

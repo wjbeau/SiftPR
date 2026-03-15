@@ -11,9 +11,9 @@ use super::pipeline::{AgentContext, AgentPipeline, PipelineRegistry, RepoContext
 use super::prompts::{build_agent_prompt, build_files_context, build_grouping_prompt, get_system_prompt};
 use super::tools::{ToolContext, ToolExecutionConfig, ToolExecutor};
 use super::types::{
-    AgentResponse, AgentSummary, AgentType, AnnotationType, FailedAgent,
+    AgentResponse, AgentSummary, AgentType, AnnotationType, DiagnosticLog, FailedAgent,
     FileAnalysis, FileContext, FileGroup, FilePriority, GroupedFile, KeyChange, LineAnnotation,
-    OrchestratedAnalysis, PRCategory, RawAgentResponse, Severity, TokenUsage,
+    OrchestratedAnalysis, PRCategory, RawAgentResponse, Severity, SharedDiagnostics, TokenUsage,
 };
 
 const AGENT_TIMEOUT_SECS: u64 = 60;
@@ -150,7 +150,20 @@ impl Orchestrator {
         tool_config: Option<ToolConfig>,
     ) -> AppResult<OrchestratedAnalysis> {
         let start_time = Instant::now();
+        let diag = SharedDiagnostics::new();
         let files_context = build_files_context(files);
+
+        let use_pipelines_flag = codebase_context.is_some()
+            && tool_config.as_ref().map(|tc| tc.repo_path.is_some()).unwrap_or(false);
+        let any_tools = tool_config.is_some();
+
+        diag.log(None, "analysis_start", serde_json::json!({
+            "provider": provider,
+            "model": default_model,
+            "file_count": files.len(),
+            "use_pipelines": use_pipelines_flag,
+            "has_tool_config": any_tools,
+        }));
 
         // Build agent configs, using defaults if not provided
         let configs: HashMap<AgentType, AgentConfig> = agent_configs
@@ -206,6 +219,7 @@ impl Orchestrator {
                     codebase_context,
                     &repo_context,
                     tool_config_ref,
+                    &diag,
                 ),
                 self.run_agent_if_enabled_with_pipeline(
                     &architecture_config,
@@ -219,6 +233,7 @@ impl Orchestrator {
                     codebase_context,
                     &repo_context,
                     tool_config_ref,
+                    &diag,
                 ),
                 self.run_agent_if_enabled_with_pipeline(
                     &style_config,
@@ -232,6 +247,7 @@ impl Orchestrator {
                     codebase_context,
                     &repo_context,
                     tool_config_ref,
+                    &diag,
                 ),
                 self.run_agent_if_enabled_with_pipeline(
                     &performance_config,
@@ -245,6 +261,7 @@ impl Orchestrator {
                     codebase_context,
                     &repo_context,
                     tool_config_ref,
+                    &diag,
                 ),
             )
         } else {
@@ -259,6 +276,7 @@ impl Orchestrator {
                     &files_context,
                     codebase_context,
                     tool_config_ref,
+                    &diag,
                 ),
                 self.run_agent_if_enabled(
                     &architecture_config,
@@ -270,6 +288,7 @@ impl Orchestrator {
                     &files_context,
                     codebase_context,
                     tool_config_ref,
+                    &diag,
                 ),
                 self.run_agent_if_enabled(
                     &style_config,
@@ -281,6 +300,7 @@ impl Orchestrator {
                     &files_context,
                     codebase_context,
                     tool_config_ref,
+                    &diag,
                 ),
                 self.run_agent_if_enabled(
                     &performance_config,
@@ -292,6 +312,7 @@ impl Orchestrator {
                     &files_context,
                     codebase_context,
                     tool_config_ref,
+                    &diag,
                 ),
             )
         };
@@ -351,16 +372,35 @@ impl Orchestrator {
         ).await {
             Ok(Ok(groups)) => {
                 println!("[AI] File grouping succeeded with {} groups", groups.len());
+                diag.log(None, "file_grouping", serde_json::json!({
+                    "status": "success",
+                    "group_count": groups.len(),
+                }));
                 analysis.file_groups = groups;
             }
             Ok(Err(e)) => {
                 println!("[AI] File grouping failed: {}", e);
+                diag.log(None, "file_grouping", serde_json::json!({
+                    "status": "error",
+                    "error": e.to_string(),
+                }));
             }
             Err(_) => {
                 println!("[AI] File grouping timed out");
+                diag.log(None, "file_grouping", serde_json::json!({
+                    "status": "timeout",
+                }));
             }
         }
 
+        let total_time_ms = start_time.elapsed().as_millis() as u64;
+        diag.log(None, "analysis_complete", serde_json::json!({
+            "total_time_ms": total_time_ms,
+            "agents_succeeded": analysis.agent_responses.len(),
+            "agents_failed": analysis.failed_agents.len(),
+        }));
+
+        analysis.diagnostics = diag.into_log();
         Ok(analysis)
     }
 
@@ -375,6 +415,7 @@ impl Orchestrator {
         files_context: &str,
         codebase_context: Option<&str>,
         tool_config: Option<&ToolConfig>,
+        diag: &SharedDiagnostics,
     ) -> Option<AppResult<AgentResponse>> {
         if !config.enabled {
             return None;
@@ -389,9 +430,17 @@ impl Orchestrator {
         // Decide whether to use tools
         let use_tools = config.use_tools && tool_config.is_some();
 
-        if use_tools {
+        let agent_name = config.agent_type.as_str();
+        let mode = if use_tools { "tools" } else { "basic" };
+        diag.log(Some(agent_name), "agent_start", serde_json::json!({
+            "agent_type": agent_name,
+            "model": model,
+            "mode": mode,
+        }));
+
+        let result = if use_tools {
             let tool_config = tool_config.unwrap();
-            Some(self.run_agent_with_tools(
+            self.run_agent_with_tools(
                 config.agent_type,
                 provider,
                 api_key,
@@ -402,9 +451,10 @@ impl Orchestrator {
                 codebase_context,
                 custom_prompt,
                 tool_config,
-            ).await)
+                diag,
+            ).await
         } else {
-            Some(self.run_agent(
+            self.run_agent(
                 config.agent_type,
                 provider,
                 api_key,
@@ -414,8 +464,26 @@ impl Orchestrator {
                 files_context,
                 codebase_context,
                 custom_prompt,
-            ).await)
+                diag,
+            ).await
+        };
+
+        match &result {
+            Ok(resp) => {
+                diag.log(Some(agent_name), "agent_complete", serde_json::json!({
+                    "processing_time_ms": resp.processing_time_ms,
+                    "finding_count": resp.findings.len(),
+                    "token_usage": resp.token_usage,
+                }));
+            }
+            Err(e) => {
+                diag.log(Some(agent_name), "agent_failed", serde_json::json!({
+                    "error": e.to_string(),
+                }));
+            }
         }
+
+        Some(result)
     }
 
     async fn run_agent(
@@ -429,8 +497,10 @@ impl Orchestrator {
         files_context: &str,
         codebase_context: Option<&str>,
         custom_system_prompt: Option<&str>,
+        diag: &SharedDiagnostics,
     ) -> AppResult<AgentResponse> {
         let start_time = Instant::now();
+        let agent_name = agent_type.as_str();
 
         // Use custom prompt if provided, otherwise use default
         let default_prompt = get_system_prompt(agent_type);
@@ -443,6 +513,18 @@ impl Orchestrator {
             files_context,
             codebase_context,
         );
+
+        diag.log(Some(agent_name), "prompt_built", serde_json::json!({
+            "system_prompt_len": system_prompt.len(),
+            "user_prompt_len": user_prompt.len(),
+            "system_prompt_preview": system_prompt.chars().take(500).collect::<String>(),
+            "user_prompt_preview": user_prompt.chars().take(500).collect::<String>(),
+        }));
+
+        diag.log(Some(agent_name), "llm_request", serde_json::json!({
+            "provider": provider,
+            "model": model,
+        }));
 
         // Apply timeout
         let result = timeout(
@@ -460,6 +542,12 @@ impl Orchestrator {
         let response_chars = response_text.len();
         let estimated_prompt_tokens = (prompt_chars / 4) as u32;
         let estimated_completion_tokens = (response_chars / 4) as u32;
+
+        diag.log(Some(agent_name), "llm_response", serde_json::json!({
+            "response_len": response_chars,
+            "has_tool_calls": false,
+            "response_preview": response_text.chars().take(300).collect::<String>(),
+        }));
 
         println!("[AI] {} agent completed in {}ms (~{} prompt + ~{} completion tokens)",
             agent_type.as_str(),
@@ -515,8 +603,10 @@ impl Orchestrator {
         codebase_context: Option<&str>,
         custom_system_prompt: Option<&str>,
         tool_config: &ToolConfig,
+        diag: &SharedDiagnostics,
     ) -> AppResult<AgentResponse> {
         let start_time = Instant::now();
+        let agent_name = agent_type.as_str();
 
         // Use custom prompt if provided, otherwise use default
         let default_prompt = get_system_prompt(agent_type);
@@ -544,8 +634,16 @@ impl Orchestrator {
             codebase_context,
         );
 
+        diag.log(Some(agent_name), "prompt_built", serde_json::json!({
+            "system_prompt_len": system_prompt.len(),
+            "user_prompt_len": user_prompt.len(),
+            "system_prompt_preview": system_prompt.chars().take(500).collect::<String>(),
+            "user_prompt_preview": user_prompt.chars().take(500).collect::<String>(),
+        }));
+
         // Create tool executor and context
-        let tool_executor = ToolExecutor::new(tool_config.execution_config.clone());
+        let tool_executor = ToolExecutor::new(tool_config.execution_config.clone())
+            .with_diagnostics(diag.clone(), agent_name);
         let tool_context = ToolContext {
             repo_path: tool_config.repo_path.clone(),
             repo_full_name: tool_config.repo_full_name.clone(),
@@ -638,8 +736,10 @@ impl Orchestrator {
         files_context: &str,
         codebase_summary: Option<&str>,
         repo_context: &RepoContext,
+        diag: &SharedDiagnostics,
     ) -> AppResult<AgentResponse> {
         let start_time = Instant::now();
+        let agent_name = agent_type.as_str();
 
         // Get the pipeline for this agent type
         let pipeline = self.pipeline_registry.get(agent_type).ok_or_else(|| {
@@ -661,9 +761,28 @@ impl Orchestrator {
             context_tokens
         );
 
+        diag.log(Some(agent_name), "context_retrieved", serde_json::json!({
+            "similar_code_count": agent_context.similar_code.len(),
+            "pattern_count": agent_context.pattern_examples.len(),
+            "context_tokens": context_tokens,
+            "codebase_summary_len": agent_context.codebase_summary.as_ref().map(|s| s.len()).unwrap_or(0),
+        }));
+
         // Build prompts using the pipeline
         let system_prompt = pipeline.build_system_prompt(&agent_context);
         let user_prompt = pipeline.build_user_prompt(pr_title, pr_body, files_context, &agent_context);
+
+        diag.log(Some(agent_name), "prompt_built", serde_json::json!({
+            "system_prompt_len": system_prompt.len(),
+            "user_prompt_len": user_prompt.len(),
+            "system_prompt_preview": system_prompt.chars().take(500).collect::<String>(),
+            "user_prompt_preview": user_prompt.chars().take(500).collect::<String>(),
+        }));
+
+        diag.log(Some(agent_name), "llm_request", serde_json::json!({
+            "provider": provider,
+            "model": model,
+        }));
 
         // Execute the agent
         let result = timeout(
@@ -681,6 +800,12 @@ impl Orchestrator {
         let response_chars = response_text.len();
         let estimated_prompt_tokens = (prompt_chars / 4) as u32;
         let estimated_completion_tokens = (response_chars / 4) as u32;
+
+        diag.log(Some(agent_name), "llm_response", serde_json::json!({
+            "response_len": response_chars,
+            "has_tool_calls": false,
+            "response_preview": response_text.chars().take(300).collect::<String>(),
+        }));
 
         println!(
             "[AI] {} agent (with pipeline) completed in {}ms (~{} prompt + ~{} completion tokens)",
@@ -730,8 +855,10 @@ impl Orchestrator {
         codebase_summary: Option<&str>,
         repo_context: &RepoContext,
         tool_config: &ToolConfig,
+        diag: &SharedDiagnostics,
     ) -> AppResult<AgentResponse> {
         let start_time = Instant::now();
+        let agent_name = agent_type.as_str();
 
         // Get the pipeline for this agent type
         let pipeline = self.pipeline_registry.get(agent_type).ok_or_else(|| {
@@ -751,6 +878,13 @@ impl Orchestrator {
             context_tokens
         );
 
+        diag.log(Some(agent_name), "context_retrieved", serde_json::json!({
+            "similar_code_count": agent_context.similar_code.len(),
+            "pattern_count": agent_context.pattern_examples.len(),
+            "context_tokens": context_tokens,
+            "codebase_summary_len": agent_context.codebase_summary.as_ref().map(|s| s.len()).unwrap_or(0),
+        }));
+
         // Build prompts using the pipeline
         let base_system_prompt = pipeline.build_system_prompt(&agent_context);
         let user_prompt = pipeline.build_user_prompt(pr_title, pr_body, files_context, &agent_context);
@@ -769,8 +903,16 @@ impl Orchestrator {
             base_system_prompt
         );
 
+        diag.log(Some(agent_name), "prompt_built", serde_json::json!({
+            "system_prompt_len": system_prompt.len(),
+            "user_prompt_len": user_prompt.len(),
+            "system_prompt_preview": system_prompt.chars().take(500).collect::<String>(),
+            "user_prompt_preview": user_prompt.chars().take(500).collect::<String>(),
+        }));
+
         // Create tool executor and context
-        let tool_executor = ToolExecutor::new(tool_config.execution_config.clone());
+        let tool_executor = ToolExecutor::new(tool_config.execution_config.clone())
+            .with_diagnostics(diag.clone(), agent_name);
         let tool_context = ToolContext {
             repo_path: tool_config.repo_path.clone(),
             repo_full_name: tool_config.repo_full_name.clone(),
@@ -850,37 +992,42 @@ impl Orchestrator {
         codebase_summary: Option<&str>,
         repo_context: &RepoContext,
         tool_config: Option<&ToolConfig>,
+        diag: &SharedDiagnostics,
     ) -> Option<AppResult<AgentResponse>> {
         if !config.enabled {
             return None;
         }
 
         let model = config.model_override.as_deref().unwrap_or(default_model);
+        let agent_name = config.agent_type.as_str();
 
         // Use tools if the agent config enables them and tool_config is available
         let use_tools = config.use_tools && tool_config.is_some();
 
-        if use_tools {
-            return Some(
-                self.run_agent_with_pipeline_and_tools(
-                    config.agent_type,
-                    provider,
-                    api_key,
-                    model,
-                    pr_title,
-                    pr_body,
-                    files,
-                    files_context,
-                    codebase_summary,
-                    repo_context,
-                    tool_config.unwrap(),
-                )
-                .await,
-            );
-        }
+        let mode = if use_tools { "pipeline+tools" } else { "pipeline" };
+        diag.log(Some(agent_name), "agent_start", serde_json::json!({
+            "agent_type": agent_name,
+            "model": model,
+            "mode": mode,
+        }));
 
-        // Use pipeline-based execution without tools
-        Some(
+        let result = if use_tools {
+            self.run_agent_with_pipeline_and_tools(
+                config.agent_type,
+                provider,
+                api_key,
+                model,
+                pr_title,
+                pr_body,
+                files,
+                files_context,
+                codebase_summary,
+                repo_context,
+                tool_config.unwrap(),
+                diag,
+            )
+            .await
+        } else {
             self.run_agent_with_pipeline(
                 config.agent_type,
                 provider,
@@ -892,9 +1039,27 @@ impl Orchestrator {
                 files_context,
                 codebase_summary,
                 repo_context,
+                diag,
             )
-            .await,
-        )
+            .await
+        };
+
+        match &result {
+            Ok(resp) => {
+                diag.log(Some(agent_name), "agent_complete", serde_json::json!({
+                    "processing_time_ms": resp.processing_time_ms,
+                    "finding_count": resp.findings.len(),
+                    "token_usage": resp.token_usage,
+                }));
+            }
+            Err(e) => {
+                diag.log(Some(agent_name), "agent_failed", serde_json::json!({
+                    "error": e.to_string(),
+                }));
+            }
+        }
+
+        Some(result)
     }
 
     async fn run_file_grouping(
@@ -1012,6 +1177,7 @@ impl Orchestrator {
             total_processing_time_ms: total_time_ms,
             total_token_usage,
             file_groups: Vec::new(), // Populated by caller after grouping
+            diagnostics: DiagnosticLog::default(),
         }
     }
 

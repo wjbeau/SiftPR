@@ -1,4 +1,71 @@
+use std::sync::{Arc, Mutex};
+use std::time::Instant;
+
 use serde::{Deserialize, Serialize};
+
+/// A single diagnostic event captured during analysis
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiagnosticEntry {
+    pub timestamp_ms: u64,
+    pub agent: Option<String>,
+    pub event: String,
+    pub data: serde_json::Value,
+}
+
+/// Collects timestamped diagnostic entries throughout the analysis pipeline
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DiagnosticLog {
+    pub entries: Vec<DiagnosticEntry>,
+}
+
+impl DiagnosticLog {
+    pub fn new() -> Self {
+        Self { entries: Vec::new() }
+    }
+
+    pub fn add(&mut self, agent: Option<&str>, event: &str, data: serde_json::Value) {
+        // timestamp_ms will be set by SharedDiagnostics which tracks the start time
+        self.entries.push(DiagnosticEntry {
+            timestamp_ms: 0,
+            agent: agent.map(String::from),
+            event: event.to_string(),
+            data,
+        });
+    }
+}
+
+/// Thread-safe wrapper for DiagnosticLog that tracks elapsed time
+#[derive(Debug, Clone)]
+pub struct SharedDiagnostics {
+    inner: Arc<Mutex<DiagnosticLog>>,
+    start: Instant,
+}
+
+impl SharedDiagnostics {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(DiagnosticLog::new())),
+            start: Instant::now(),
+        }
+    }
+
+    pub fn log(&self, agent: Option<&str>, event: &str, data: serde_json::Value) {
+        if let Ok(mut log) = self.inner.lock() {
+            log.entries.push(DiagnosticEntry {
+                timestamp_ms: self.start.elapsed().as_millis() as u64,
+                agent: agent.map(String::from),
+                event: event.to_string(),
+                data,
+            });
+        }
+    }
+
+    pub fn into_log(self) -> DiagnosticLog {
+        Arc::try_unwrap(self.inner)
+            .map(|m| m.into_inner().unwrap_or_default())
+            .unwrap_or_default()
+    }
+}
 
 /// Agent types that perform specialized analysis
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -190,6 +257,8 @@ pub struct OrchestratedAnalysis {
     pub total_token_usage: TokenUsage,
     #[serde(default)]
     pub file_groups: Vec<FileGroup>,
+    #[serde(default)]
+    pub diagnostics: DiagnosticLog,
 }
 
 /// Raw response format expected from agents (for JSON parsing)
