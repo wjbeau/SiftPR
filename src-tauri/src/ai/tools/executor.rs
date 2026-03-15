@@ -178,8 +178,8 @@ impl ToolExecutor {
             messages.push(self.format_assistant_message(provider, &response, &tool_calls));
 
             // Add tool results to messages
-            let results_message = self.format_tool_results_message(provider, &results, formatter.as_ref());
-            messages.push(results_message);
+            let results_messages = self.format_tool_results_messages(provider, &results, formatter.as_ref());
+            messages.extend(results_messages);
 
             iterations += 1;
         }
@@ -206,9 +206,11 @@ impl ToolExecutor {
                 })
                 .await;
 
+                let tool_name = call.name.clone();
                 return match result {
                     Ok(Ok(mut tool_result)) => {
                         tool_result.call_id = call_id;
+                        tool_result.tool_name = tool_name;
                         tool_result
                     }
                     Ok(Err(e)) => ToolResult::error(call_id, e.to_string()),
@@ -230,6 +232,7 @@ impl ToolExecutor {
         match result {
             Ok(Ok(mut tool_result)) => {
                 tool_result.call_id = call.id.clone();
+                tool_result.tool_name = call.name.clone();
                 tool_result
             }
             Ok(Err(e)) => ToolResult::error(call.id.clone(), e.to_string()),
@@ -294,29 +297,31 @@ impl ToolExecutor {
         }
     }
 
-    fn format_tool_results_message(
+    fn format_tool_results_messages(
         &self,
         provider: &str,
         results: &[ToolResult],
         formatter: &dyn ToolFormatter,
-    ) -> serde_json::Value {
+    ) -> Vec<serde_json::Value> {
         match provider {
             "anthropic" => {
                 // Anthropic: tool results as user message with tool_result blocks
-                serde_json::json!({
+                vec![serde_json::json!({
                     "role": "user",
                     "content": formatter.format_tool_results(results, &serde_json::json!({}))
-                })
+                })]
             }
             "google" => {
-                // Google: function response
-                formatter.format_tool_results(results, &serde_json::json!({}))
+                // Google: function response as a single message with role
+                let parts = formatter.format_tool_results(results, &serde_json::json!({}));
+                vec![serde_json::json!({
+                    "role": "user",
+                    "parts": parts.get("parts").cloned().unwrap_or(serde_json::json!([]))
+                })]
             }
             _ => {
-                // OpenAI: separate tool messages for each result
-                // Return the first result as a tool message (simplified)
-                // In practice, we'd need to handle multiple tool results
-                if let Some(result) = results.first() {
+                // OpenAI: one tool message per result
+                results.iter().map(|result| {
                     serde_json::json!({
                         "role": "tool",
                         "tool_call_id": result.call_id,
@@ -326,12 +331,7 @@ impl ToolExecutor {
                             format!("Error: {}", result.error.as_deref().unwrap_or("Unknown error"))
                         }
                     })
-                } else {
-                    serde_json::json!({
-                        "role": "tool",
-                        "content": "No results"
-                    })
-                }
+                }).collect()
             }
         }
     }

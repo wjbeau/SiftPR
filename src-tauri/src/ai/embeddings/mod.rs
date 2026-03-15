@@ -298,6 +298,83 @@ impl EmbeddingProvider for VoyageEmbeddings {
     }
 }
 
+/// OpenRouter embedding provider
+/// Uses OpenRouter's OpenAI-compatible embeddings API.
+/// Supports models like openai/text-embedding-3-small routed through OpenRouter.
+pub struct OpenRouterEmbeddings;
+
+#[async_trait]
+impl EmbeddingProvider for OpenRouterEmbeddings {
+    fn provider_name(&self) -> &'static str {
+        "openrouter"
+    }
+
+    fn default_model(&self) -> &'static str {
+        "openai/text-embedding-3-small"
+    }
+
+    fn dimensions(&self, model: &str) -> usize {
+        match model {
+            "openai/text-embedding-3-large" => 3072,
+            "openai/text-embedding-3-small" => 1536,
+            "openai/text-embedding-ada-002" => 1536,
+            _ => 1536,
+        }
+    }
+
+    async fn embed_texts(
+        &self,
+        api_key: &str,
+        model: &str,
+        texts: &[String],
+    ) -> AppResult<Vec<Vec<f32>>> {
+        let client = reqwest::Client::new();
+
+        #[derive(Serialize)]
+        struct EmbeddingRequest<'a> {
+            input: &'a [String],
+            model: &'a str,
+        }
+
+        #[derive(Deserialize)]
+        struct EmbeddingResponse {
+            data: Vec<EmbeddingData>,
+        }
+
+        #[derive(Deserialize)]
+        struct EmbeddingData {
+            embedding: Vec<f32>,
+        }
+
+        let response = client
+            .post("https://openrouter.ai/api/v1/embeddings")
+            .header("Authorization", format!("Bearer {}", api_key.trim()))
+            .header("HTTP-Referer", "https://siftpr.app")
+            .header("X-Title", "SiftPR")
+            .header("Content-Type", "application/json")
+            .json(&EmbeddingRequest { input: texts, model })
+            .send()
+            .await
+            .map_err(|e| AppError::Embedding(format!("HTTP error: {}", e)))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(AppError::Embedding(format!(
+                "OpenRouter API error {}: {}",
+                status, body
+            )));
+        }
+
+        let result: EmbeddingResponse = response
+            .json()
+            .await
+            .map_err(|e| AppError::Embedding(format!("JSON parse error: {}", e)))?;
+
+        Ok(result.data.into_iter().map(|d| d.embedding).collect())
+    }
+}
+
 /// Ollama local embedding provider
 /// Uses the Ollama API (OpenAI-compatible) at a configurable base URL.
 /// The `api_key` parameter is used to pass the base URL instead (no auth needed).
@@ -405,6 +482,7 @@ pub fn get_provider(name: &str) -> Option<Box<dyn EmbeddingProvider>> {
         "openai" => Some(Box::new(OpenAIEmbeddings)),
         "google" => Some(Box::new(GoogleEmbeddings)),
         "voyage" | "anthropic" => Some(Box::new(VoyageEmbeddings)),
+        "openrouter" => Some(Box::new(OpenRouterEmbeddings)),
         "ollama" => Some(Box::new(OllamaEmbeddings)),
         _ => None,
     }
@@ -416,6 +494,7 @@ pub fn get_dimensions(provider: &str, model: &str) -> usize {
         "openai" => OpenAIEmbeddings.dimensions(model),
         "google" => GoogleEmbeddings.dimensions(model),
         "voyage" | "anthropic" => VoyageEmbeddings.dimensions(model),
+        "openrouter" => OpenRouterEmbeddings.dimensions(model),
         "ollama" => OllamaEmbeddings.dimensions(model),
         _ => 1536, // Default to OpenAI dimensions
     }

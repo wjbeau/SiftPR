@@ -55,8 +55,43 @@ pub struct AIClient {
 impl AIClient {
     pub fn new() -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(30))
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
         }
+    }
+
+    /// Send an HTTP request with retry logic for transient failures (429, 500, 502, 503, 504).
+    /// Uses exponential backoff: 1s, 2s, 4s with max 2 retries.
+    /// The `build_request` closure is called on each attempt since `RequestBuilder` isn't Clone.
+    async fn send_with_retry<F>(&self, build_request: F) -> Result<reqwest::Response, reqwest::Error>
+    where
+        F: Fn() -> reqwest::RequestBuilder,
+    {
+        let max_retries = 2u32;
+        let mut last_response = build_request().send().await?;
+
+        for attempt in 0..max_retries {
+            let status = last_response.status().as_u16();
+            if status != 429 && status != 500 && status != 502 && status != 503 && status != 504 {
+                return Ok(last_response);
+            }
+
+            let delay = std::time::Duration::from_secs(1 << attempt);
+            println!(
+                "[AIClient] Retrying after {} error (attempt {}/{}), waiting {:?}",
+                status,
+                attempt + 1,
+                max_retries,
+                delay
+            );
+            tokio::time::sleep(delay).await;
+            last_response = build_request().send().await?;
+        }
+
+        Ok(last_response)
     }
 
     /// Analyze a PR using the specified AI provider (legacy method)
@@ -150,15 +185,6 @@ impl AIClient {
         })];
         all_messages.extend(messages.iter().cloned());
 
-        let mut request = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", api_key));
-
-        for (key, value) in headers {
-            request = request.header(key, value);
-        }
-
         let body = serde_json::json!({
             "model": model,
             "messages": all_messages,
@@ -166,7 +192,19 @@ impl AIClient {
             "temperature": 0.3
         });
 
-        let response = request.json(&body).send().await?;
+        let url_clone = url.clone();
+        let api_key_owned = api_key.to_string();
+        let headers_owned: Vec<(String, String)> = headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+
+        let response = self.send_with_retry(|| {
+            let mut req = self.client
+                .post(&url_clone)
+                .header("Authorization", format!("Bearer {}", api_key_owned));
+            for (key, value) in &headers_owned {
+                req = req.header(key.as_str(), value.as_str());
+            }
+            req.json(&body)
+        }).await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -223,14 +261,16 @@ impl AIClient {
             "tools": tools
         });
 
-        let response = self
-            .client
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
-            .json(&body)
-            .send()
-            .await?;
+        let api_key_owned = api_key.to_string();
+        let body_clone = body.clone();
+
+        let response = self.send_with_retry(|| {
+            self.client
+                .post("https://api.anthropic.com/v1/messages")
+                .header("x-api-key", &api_key_owned)
+                .header("anthropic-version", "2023-06-01")
+                .json(&body_clone)
+        }).await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -267,9 +307,17 @@ impl AIClient {
                 let role = m.get("role")?.as_str()?;
                 let google_role = match role {
                     "user" | "tool" => "user",
-                    "assistant" => "model",
+                    "assistant" | "model" => "model",
                     _ => return None,
                 };
+
+                // Check if this message already has structured parts (e.g. functionResponse or model parts)
+                if let Some(parts) = m.get("parts") {
+                    return Some(serde_json::json!({
+                        "role": google_role,
+                        "parts": parts
+                    }));
+                }
 
                 let content = m.get("content")?;
                 Some(serde_json::json!({
@@ -290,7 +338,12 @@ impl AIClient {
             }
         });
 
-        let response = self.client.post(&url).json(&body).send().await?;
+        let url_clone = url.clone();
+        let body_clone = body.clone();
+
+        let response = self.send_with_retry(|| {
+            self.client.post(&url_clone).json(&body_clone)
+        }).await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -338,12 +391,17 @@ impl AIClient {
             "temperature": 0.3
         });
 
-        let mut request = self.client.post(&url);
-        if !api_key.is_empty() {
-            request = request.header("Authorization", format!("Bearer {}", api_key));
-        }
+        let url_clone = url.clone();
+        let api_key_owned = api_key.to_string();
+        let body_clone = body.clone();
 
-        let response = request.json(&body).send().await.map_err(|e| {
+        let response = self.send_with_retry(|| {
+            let mut req = self.client.post(&url_clone);
+            if !api_key_owned.is_empty() {
+                req = req.header("Authorization", format!("Bearer {}", api_key_owned));
+            }
+            req.json(&body_clone)
+        }).await.map_err(|e| {
             AppError::AIProvider(format!("Failed to connect to {}: {}", url, e))
         })?;
 
@@ -406,27 +464,29 @@ impl AIClient {
             content: String,
         }
 
-        let response = self
-            .client
-            .post("https://api.openai.com/v1/chat/completions")
-            .header("Authorization", format!("Bearer {}", api_key))
-            .json(&serde_json::json!({
-                "model": model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": system_prompt
-                    },
-                    {
-                        "role": "user",
-                        "content": user_prompt
-                    }
-                ],
-                "temperature": 0.3,
-                "response_format": { "type": "json_object" }
-            }))
-            .send()
-            .await?;
+        let api_key_owned = api_key.to_string();
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": user_prompt
+                }
+            ],
+            "temperature": 0.3,
+            "response_format": { "type": "json_object" }
+        });
+
+        let response = self.send_with_retry(|| {
+            self.client
+                .post("https://api.openai.com/v1/chat/completions")
+                .header("Authorization", format!("Bearer {}", api_key_owned))
+                .json(&body)
+        }).await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -455,24 +515,26 @@ impl AIClient {
             text: String,
         }
 
-        let response = self
-            .client
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
-            .json(&serde_json::json!({
-                "model": model,
-                "max_tokens": 4096,
-                "system": system_prompt,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": user_prompt
-                    }
-                ]
-            }))
-            .send()
-            .await?;
+        let api_key_owned = api_key.to_string();
+        let body = serde_json::json!({
+            "model": model,
+            "max_tokens": 4096,
+            "system": system_prompt,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": user_prompt
+                }
+            ]
+        });
+
+        let response = self.send_with_retry(|| {
+            self.client
+                .post("https://api.anthropic.com/v1/messages")
+                .header("x-api-key", &api_key_owned)
+                .header("anthropic-version", "2023-06-01")
+                .json(&body)
+        }).await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -507,29 +569,30 @@ impl AIClient {
         }
 
         // Trim API key to avoid authentication issues from whitespace
-        let api_key = api_key.trim();
+        let api_key_owned = api_key.trim().to_string();
 
-        let response = self
-            .client
-            .post("https://openrouter.ai/api/v1/chat/completions")
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("HTTP-Referer", "https://siftpr.app")
-            .header("X-Title", "SiftPR")
-            .json(&serde_json::json!({
-                "model": model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": system_prompt
-                    },
-                    {
-                        "role": "user",
-                        "content": user_prompt
-                    }
-                ]
-            }))
-            .send()
-            .await?;
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": user_prompt
+                }
+            ]
+        });
+
+        let response = self.send_with_retry(|| {
+            self.client
+                .post("https://openrouter.ai/api/v1/chat/completions")
+                .header("Authorization", format!("Bearer {}", api_key_owned))
+                .header("HTTP-Referer", "https://siftpr.app")
+                .header("X-Title", "SiftPR")
+                .json(&body)
+        }).await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -576,26 +639,26 @@ impl AIClient {
             model, api_key
         );
 
-        let response = self
-            .client
-            .post(&url)
-            .json(&serde_json::json!({
-                "systemInstruction": {
-                    "parts": [{ "text": system_prompt }]
-                },
-                "contents": [
-                    {
-                        "role": "user",
-                        "parts": [{ "text": user_prompt }]
-                    }
-                ],
-                "generationConfig": {
-                    "temperature": 0.3,
-                    "responseMimeType": "application/json"
+        let body = serde_json::json!({
+            "systemInstruction": {
+                "parts": [{ "text": system_prompt }]
+            },
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{ "text": user_prompt }]
                 }
-            }))
-            .send()
-            .await?;
+            ],
+            "generationConfig": {
+                "temperature": 0.3,
+                "responseMimeType": "application/json"
+            }
+        });
+
+        let url_clone = url.clone();
+        let response = self.send_with_retry(|| {
+            self.client.post(&url_clone).json(&body)
+        }).await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -627,26 +690,26 @@ impl AIClient {
 
         let url = format!("{}/api/chat", base_url.trim_end_matches('/'));
 
-        let response = self
-            .client
-            .post(&url)
-            .json(&serde_json::json!({
-                "model": model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": system_prompt
-                    },
-                    {
-                        "role": "user",
-                        "content": user_prompt
-                    }
-                ],
-                "stream": false,
-                "format": "json"
-            }))
-            .send()
-            .await
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": user_prompt
+                }
+            ],
+            "stream": false,
+            "format": "json"
+        });
+
+        let url_clone = url.clone();
+        let response = self.send_with_retry(|| {
+            self.client.post(&url_clone).json(&body)
+        }).await
             .map_err(|e| AppError::AIProvider(format!("Failed to connect to Ollama at {}: {}", url, e)))?;
 
         if !response.status().is_success() {
@@ -687,31 +750,30 @@ impl AIClient {
 
         let url = format!("{}/v1/chat/completions", base_url.trim_end_matches('/'));
 
-        let mut request = self
-            .client
-            .post(&url)
-            .json(&serde_json::json!({
-                "model": model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": system_prompt
-                    },
-                    {
-                        "role": "user",
-                        "content": user_prompt
-                    }
-                ],
-                "temperature": 0.3
-            }));
+        let body = serde_json::json!({
+            "model": model,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": user_prompt
+                }
+            ],
+            "temperature": 0.3
+        });
 
-        if !api_key.is_empty() {
-            request = request.header("Authorization", format!("Bearer {}", api_key));
-        }
-
-        let response = request
-            .send()
-            .await
+        let url_clone = url.clone();
+        let api_key_owned = api_key.to_string();
+        let response = self.send_with_retry(|| {
+            let mut req = self.client.post(&url_clone).json(&body);
+            if !api_key_owned.is_empty() {
+                req = req.header("Authorization", format!("Bearer {}", api_key_owned));
+            }
+            req
+        }).await
             .map_err(|e| AppError::AIProvider(format!("Failed to connect to {}: {}", url, e)))?;
 
         if !response.status().is_success() {

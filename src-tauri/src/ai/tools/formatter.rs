@@ -315,7 +315,7 @@ impl ToolFormatter for GoogleFormatter {
             "parts": results.iter().map(|r| {
                 json!({
                     "functionResponse": {
-                        "name": r.call_id.replace("call_", ""), // Name, not ID for Google
+                        "name": &r.tool_name,
                         "response": {
                             "result": if r.success {
                                 serde_json::from_str::<serde_json::Value>(&r.output)

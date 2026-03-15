@@ -43,6 +43,9 @@ pub struct ToolCall {
 pub struct ToolResult {
     /// The ID of the tool call this result is for
     pub call_id: String,
+    /// The name of the tool that was called
+    #[serde(default)]
+    pub tool_name: String,
     /// Whether the tool executed successfully
     pub success: bool,
     /// The output from the tool (may be JSON or plain text)
@@ -55,6 +58,7 @@ impl ToolResult {
     pub fn success(call_id: String, output: String) -> Self {
         Self {
             call_id,
+            tool_name: String::new(),
             success: true,
             output,
             error: None,
@@ -64,6 +68,7 @@ impl ToolResult {
     pub fn error(call_id: String, error: String) -> Self {
         Self {
             call_id,
+            tool_name: String::new(),
             success: false,
             output: String::new(),
             error: Some(error),

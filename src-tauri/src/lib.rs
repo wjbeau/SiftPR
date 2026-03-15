@@ -929,6 +929,7 @@ async fn codebase_index_start(
         let embed_model = match embedding_provider.as_str() {
             "openai" => "text-embedding-3-small",
             "google" => "gemini-embedding-001",
+            "openrouter" => "openai/text-embedding-3-small",
             "ollama" => "nomic-embed-text",
             _ => "text-embedding-3-small",
         }.to_string();
@@ -1036,7 +1037,7 @@ async fn codebase_semantic_search(
 
         let (provider, key) = app.db.get_embedding_provider(&user.id)?
             .ok_or_else(|| AppError::AIProvider(
-                "No embedding-capable AI provider configured. Add an OpenAI or Google API key in Settings.".to_string()
+                "No embedding-capable AI provider configured. Add an OpenAI, Google, or OpenRouter API key in Settings.".to_string()
             ))?;
 
         (index.id, provider, key)
@@ -1050,6 +1051,7 @@ async fn codebase_semantic_search(
     let embed_model = match embedding_provider.as_str() {
         "openai" => "text-embedding-3-small",
         "google" => "gemini-embedding-001",
+        "openrouter" => "openai/text-embedding-3-small",
         _ => "text-embedding-3-small",
     };
 

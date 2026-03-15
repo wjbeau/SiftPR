@@ -1,5 +1,6 @@
 import { Routes, Route } from "react-router-dom";
 import { AuthProvider } from "./contexts/AuthContext";
+import { AnalysisProvider } from "./contexts/AnalysisContext";
 import { TabsProvider } from "./contexts/TabsContext";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import { Layout } from "./components/Layout";
@@ -12,6 +13,7 @@ function App() {
   return (
     <ThemeProvider>
       <AuthProvider>
+        <AnalysisProvider>
         <Routes>
           <Route path="/login" element={<Login />} />
           <Route
@@ -26,6 +28,7 @@ function App() {
             <Route path="/review/:owner/:repo/:prNumber" element={<Review />} />
           </Route>
         </Routes>
+        </AnalysisProvider>
       </AuthProvider>
     </ThemeProvider>
   );

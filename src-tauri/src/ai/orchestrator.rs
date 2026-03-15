@@ -205,6 +205,7 @@ impl Orchestrator {
                     &files_context,
                     codebase_context,
                     &repo_context,
+                    tool_config_ref,
                 ),
                 self.run_agent_if_enabled_with_pipeline(
                     &architecture_config,
@@ -217,6 +218,7 @@ impl Orchestrator {
                     &files_context,
                     codebase_context,
                     &repo_context,
+                    tool_config_ref,
                 ),
                 self.run_agent_if_enabled_with_pipeline(
                     &style_config,
@@ -229,6 +231,7 @@ impl Orchestrator {
                     &files_context,
                     codebase_context,
                     &repo_context,
+                    tool_config_ref,
                 ),
                 self.run_agent_if_enabled_with_pipeline(
                     &performance_config,
@@ -241,6 +244,7 @@ impl Orchestrator {
                     &files_context,
                     codebase_context,
                     &repo_context,
+                    tool_config_ref,
                 ),
             )
         } else {
@@ -712,6 +716,126 @@ impl Orchestrator {
         })
     }
 
+    /// Run an agent using pipeline context retrieval combined with tool calling
+    async fn run_agent_with_pipeline_and_tools(
+        &self,
+        agent_type: AgentType,
+        provider: &str,
+        api_key: &str,
+        model: &str,
+        pr_title: &str,
+        pr_body: Option<&str>,
+        files: &[GitHubFile],
+        files_context: &str,
+        codebase_summary: Option<&str>,
+        repo_context: &RepoContext,
+        tool_config: &ToolConfig,
+    ) -> AppResult<AgentResponse> {
+        let start_time = Instant::now();
+
+        // Get the pipeline for this agent type
+        let pipeline = self.pipeline_registry.get(agent_type).ok_or_else(|| {
+            AppError::Internal(format!("No pipeline found for agent type: {:?}", agent_type))
+        })?;
+
+        // Retrieve agent-specific context
+        let mut agent_context = pipeline.retrieve_context(files, repo_context).await?;
+        agent_context.codebase_summary = codebase_summary.map(String::from);
+
+        let context_tokens = agent_context.estimated_tokens();
+        println!(
+            "[AI] {} agent (pipeline+tools) retrieved context: {} similar code examples, {} patterns (~{} tokens)",
+            agent_type.as_str(),
+            agent_context.similar_code.len(),
+            agent_context.pattern_examples.len(),
+            context_tokens
+        );
+
+        // Build prompts using the pipeline
+        let base_system_prompt = pipeline.build_system_prompt(&agent_context);
+        let user_prompt = pipeline.build_user_prompt(pr_title, pr_body, files_context, &agent_context);
+
+        // Enhance system prompt with tool instructions
+        let system_prompt = format!(
+            "{}\n\n## Available Tools\n\
+            You have access to the following tools to help analyze this PR:\n\
+            - `search_repo`: Search for patterns in the codebase using regex\n\
+            - `read_file`: Read the contents of specific files\n\n\
+            Use these tools when you need to:\n\
+            - Find how a function/class/pattern is used elsewhere in the codebase\n\
+            - Read related files to understand context\n\
+            - Verify your assumptions about the code\n\n\
+            After using tools, provide your final analysis in the expected JSON format.",
+            base_system_prompt
+        );
+
+        // Create tool executor and context
+        let tool_executor = ToolExecutor::new(tool_config.execution_config.clone());
+        let tool_context = ToolContext {
+            repo_path: tool_config.repo_path.clone(),
+            repo_full_name: tool_config.repo_full_name.clone(),
+            user_id: tool_config.user_id.clone(),
+        };
+
+        // Execute with tools and longer timeout
+        let result = timeout(
+            Duration::from_secs(AGENT_WITH_TOOLS_TIMEOUT_SECS),
+            tool_executor.execute(
+                &self.client,
+                provider,
+                api_key,
+                model,
+                &system_prompt,
+                &user_prompt,
+                &tool_context,
+            ),
+        )
+        .await
+        .map_err(|_| AppError::AIProvider(format!("{} agent timed out", agent_type.as_str())))?;
+
+        let execution_result = result?;
+        let response_text = execution_result.response;
+        let processing_time_ms = start_time.elapsed().as_millis() as u64;
+
+        println!(
+            "[AI] {} agent (pipeline+tools) completed in {}ms ({} tool calls, {} iterations)",
+            agent_type.as_str(),
+            processing_time_ms,
+            execution_result.tool_calls_made,
+            execution_result.iterations
+        );
+
+        println!(
+            "[AI] {} agent raw response (first 500 chars): {}",
+            agent_type.as_str(),
+            &response_text.chars().take(500).collect::<String>()
+        );
+
+        // Estimate token usage
+        let prompt_chars = system_prompt.len() + user_prompt.len();
+        let response_chars = response_text.len();
+        let estimated_prompt_tokens = (prompt_chars / 4) as u32;
+        let estimated_completion_tokens = (response_chars / 4) as u32;
+
+        // Parse the response
+        let raw_response = parse_agent_response(&response_text).map_err(|e| {
+            println!("[AI] {} agent parse error: {}", agent_type.as_str(), e);
+            e
+        })?;
+
+        // Post-process using the pipeline
+        let response = pipeline.post_process(raw_response, processing_time_ms);
+
+        Ok(AgentResponse {
+            token_usage: Some(TokenUsage {
+                prompt_tokens: estimated_prompt_tokens,
+                completion_tokens: estimated_completion_tokens,
+                total_tokens: estimated_prompt_tokens + estimated_completion_tokens,
+            }),
+            ..response
+        })
+    }
+
     /// Run an agent with pipeline context retrieval and optional tool support
     async fn run_agent_if_enabled_with_pipeline(
         &self,
@@ -725,6 +849,7 @@ impl Orchestrator {
         files_context: &str,
         codebase_summary: Option<&str>,
         repo_context: &RepoContext,
+        tool_config: Option<&ToolConfig>,
     ) -> Option<AppResult<AgentResponse>> {
         if !config.enabled {
             return None;
@@ -732,7 +857,29 @@ impl Orchestrator {
 
         let model = config.model_override.as_deref().unwrap_or(default_model);
 
-        // Use pipeline-based execution
+        // Use tools if the agent config enables them and tool_config is available
+        let use_tools = config.use_tools && tool_config.is_some();
+
+        if use_tools {
+            return Some(
+                self.run_agent_with_pipeline_and_tools(
+                    config.agent_type,
+                    provider,
+                    api_key,
+                    model,
+                    pr_title,
+                    pr_body,
+                    files,
+                    files_context,
+                    codebase_summary,
+                    repo_context,
+                    tool_config.unwrap(),
+                )
+                .await,
+            );
+        }
+
+        // Use pipeline-based execution without tools
         Some(
             self.run_agent_with_pipeline(
                 config.agent_type,

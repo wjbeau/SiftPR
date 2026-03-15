@@ -3,7 +3,8 @@ import { useParams, Link } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import ReactMarkdown from "react-markdown";
 import { ArrowLeft, FileCode, Loader2, Sparkles, Calendar, MessageSquare, User, Users, GitPullRequest, RefreshCw, ClipboardList, AlertTriangle, BookOpen, Files, ChevronDown, ChevronUp, Check, CheckCircle2, XCircle, MessageCircle, Eye, EyeOff, Plus, Send, Filter, History, Pencil, Trash2, X, Shield, Layers, Paintbrush, Zap, FolderOpen, Settings, Download, FileText } from "lucide-react";
-import { github, GitHubFile, GitHubPR, GitHubReview, review, ai, analysis as analysisApi, OrchestratedAnalysis, FileAnalysis, LineAnnotation, AgentType, codebase, LinkedRepo, ReviewComment, draftComments } from "@/lib/api";
+import { github, GitHubFile, GitHubPR, GitHubReview, review, OrchestratedAnalysis, FileAnalysis, LineAnnotation, AgentType, codebase, LinkedRepo, ReviewComment, draftComments } from "@/lib/api";
+import { useAnalysis, makeAnalysisKey, type AnalysisMode } from "@/contexts/AnalysisContext";
 import { logger } from "@/lib/logger";
 import { useAuth } from "@/contexts/AuthContext";
 import { Button } from "@/components/ui/button";
@@ -46,11 +47,10 @@ export function Review() {
   const [showReviewDialog, setShowReviewDialog] = useState(false);
   const [reviewBody, setReviewBody] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("all");
-  const [analysis, setAnalysis] = useState<OrchestratedAnalysis | null>(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
-  const [analysisError, setAnalysisError] = useState<string | null>(null);
-  const [analysisMode, setAnalysisMode] = useState<"pr_only" | "with_context">("pr_only");
-  const [lastAnalysisMode, setLastAnalysisMode] = useState<"pr_only" | "with_context" | null>(null);
+  const analysisCtx = useAnalysis();
+  const analysisKey = owner && repo && prNumber ? makeAnalysisKey(owner, repo, prNumber) : "";
+  const { isAnalyzing, analysis, analysisError, analysisMode, lastAnalysisMode } = analysisCtx.getEntry(analysisKey);
+  const setAnalysisMode = useCallback((mode: AnalysisMode) => analysisCtx.setAnalysisMode(analysisKey, mode), [analysisCtx, analysisKey]);
   const [showFullAnalysis, setShowFullAnalysis] = useState(false);
   const [isSubmittingReview, setIsSubmittingReview] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -194,22 +194,11 @@ export function Review() {
   }, [owner, repo, prNumberInt, hasLoadedDrafts]);
 
   // Load saved analysis when PR data is available
-  const [hasLoadedAnalysis, setHasLoadedAnalysis] = useState(false);
   useEffect(() => {
-    if (pr?.head.sha && owner && repo && prNumberInt && !hasLoadedAnalysis && !analysis) {
-      setHasLoadedAnalysis(true);
-      analysisApi.get(owner, repo, prNumberInt, pr.head.sha)
-        .then((savedAnalysis) => {
-          if (savedAnalysis) {
-            logger.log("Loaded saved analysis for commit:", pr.head.sha);
-            setAnalysis(savedAnalysis);
-          }
-        })
-        .catch((err) => {
-          logger.error("Failed to load saved analysis:", err);
-        });
+    if (pr?.head.sha && owner && repo && prNumberInt && analysisKey) {
+      analysisCtx.loadCachedAnalysis(analysisKey, owner, repo, prNumberInt, pr.head.sha);
     }
-  }, [pr?.head.sha, owner, repo, prNumberInt, hasLoadedAnalysis, analysis]);
+  }, [pr?.head.sha, owner, repo, prNumberInt, analysisKey, analysisCtx]);
 
   // Determine which files to show based on view mode
   const displayFiles = useMemo(() => {
@@ -222,39 +211,10 @@ export function Review() {
   const hasReviewedBefore = !!reviewState?.last_reviewed_commit;
   const hasNewChanges = hasReviewedBefore && pr?.head.sha !== reviewState?.last_reviewed_commit;
 
-  const runAnalysis = useCallback(async () => {
-    if (!prUrl || !owner || !repo || !pr?.head.sha) return;
-    setIsAnalyzing(true);
-    setAnalysisError(null);
-    try {
-      const withContext = analysisMode === "with_context";
-      logger.log("Starting analysis for:", prUrl, "with context:", withContext);
-      const result = await ai.analyzePROrchestrated(prUrl, withContext);
-      logger.log("Analysis result:", result);
-      setAnalysis(result);
-      setLastAnalysisMode(analysisMode);
-
-      // Save analysis to cache
-      try {
-        await analysisApi.save(owner, repo, prNumberInt, pr.head.sha, result);
-        logger.log("Analysis saved to cache");
-      } catch (saveErr) {
-        logger.error("Failed to save analysis:", saveErr);
-      }
-    } catch (e) {
-      logger.error("Analysis failed:", e);
-      // Tauri errors come as strings or objects with message property
-      const errorMsg = typeof e === "string"
-        ? e
-        : (e as { message?: string })?.message || JSON.stringify(e);
-      setAnalysisError(errorMsg);
-      // Clear stale analysis so the error is visible to the user
-      // (the UI only shows errors when analysis is null)
-      setAnalysis(null);
-    } finally {
-      setIsAnalyzing(false);
-    }
-  }, [prUrl, analysisMode, owner, repo, prNumberInt, pr?.head.sha]);
+  const runAnalysis = useCallback(() => {
+    if (!prUrl || !owner || !repo || !pr?.head.sha || !analysisKey) return;
+    analysisCtx.runAnalysis(analysisKey, prUrl, analysisMode, owner, repo, prNumberInt, pr.head.sha);
+  }, [prUrl, analysisMode, owner, repo, prNumberInt, pr?.head.sha, analysisKey, analysisCtx]);
 
   // Get file analysis for selected file
   const selectedFileAnalysis = useMemo(() => {
@@ -1603,7 +1563,7 @@ function AIAnalyticsPanel({ analysis, isAnalyzing, error, onRunAnalysis, linkedR
   const totalTokens = analysis.total_token_usage?.total_tokens || 0;
 
   return (
-    <div className="space-y-6 max-w-3xl">
+    <div className="space-y-6">
       {/* Header with risk level */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">

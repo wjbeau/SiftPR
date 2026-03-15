@@ -663,7 +663,7 @@ impl Database {
         }
 
         // Fallback: Cloud providers that support embeddings
-        let embedding_providers = ["openai", "google"];
+        let embedding_providers = ["openai", "google", "openrouter"];
 
         for provider in &embedding_providers {
             let result: Option<String> = conn.query_row(

@@ -213,7 +213,7 @@ function AgentCard({ agent, settings, providerModels, embeddingCapability, onSav
                       Limited to file search tools
                     </p>
                     <p className="text-orange-700 dark:text-orange-300 mt-0.5">
-                      Add an OpenAI or Google API key in the Providers tab to enable semantic search on indexed repositories.
+                      Add an OpenAI, Google, or OpenRouter API key in the Providers tab to enable semantic search on indexed repositories.
                       Without embeddings, this agent uses grep and file reading to find related code.
                     </p>
                   </div>
@@ -852,7 +852,7 @@ function MCPServersSection({ agentType }: { agentType: string }) {
 
 const ANALYSIS_AGENTS = ["security", "architecture", "style", "performance"];
 const INTERNAL_AGENTS = ["profiler", "research"];
-const EMBEDDING_PROVIDERS = ["openai", "google", "ollama"];
+const EMBEDDING_PROVIDERS = ["openai", "google", "openrouter", "ollama"];
 
 export function Agents() {
   const queryClient = useQueryClient();
@@ -1127,7 +1127,7 @@ export function Agents() {
                 </Button>
               </div>
               <p className="text-xs text-muted-foreground">
-                Only embedding-capable providers (OpenAI, Google, Ollama) are shown.
+                Only embedding-capable providers (OpenAI, Google, OpenRouter, Ollama) are shown.
                 Embeddings for semantic search are generated using this provider.
               </p>
             </div>
