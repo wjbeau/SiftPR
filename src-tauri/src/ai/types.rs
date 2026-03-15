@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// A single diagnostic event captured during analysis
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -276,9 +276,28 @@ pub struct RawAgentSummary {
     pub top_concerns: Vec<String>,
 }
 
+/// Deserializes a line number that may be a number, a string like "369", or a range like "154-168".
+fn deserialize_line_number<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value: Option<serde_json::Value> = Option::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(n)) => Ok(n.as_u64().map(|v| v as u32)),
+        Some(serde_json::Value::String(s)) => {
+            // Handle range like "154-168" by taking the first number
+            let first = s.split('-').next().unwrap_or(&s);
+            Ok(first.trim().parse::<u32>().ok())
+        }
+        _ => Ok(None),
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct RawAgentFinding {
     pub file: String,
+    #[serde(default, deserialize_with = "deserialize_line_number")]
     pub line: Option<u32>,
     pub message: String,
     pub severity: String,
