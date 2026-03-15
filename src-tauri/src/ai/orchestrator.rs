@@ -615,13 +615,16 @@ impl Orchestrator {
         // Enhance system prompt with tool instructions
         let system_prompt = format!(
             "{}\n\n## Available Tools\n\
-            You have access to the following tools to help analyze this PR:\n\
+            You have access to the following tools to investigate the codebase:\n\
             - `search_repo`: Search for patterns in the codebase using regex\n\
             - `read_file`: Read the contents of specific files\n\n\
-            Use these tools when you need to:\n\
-            - Find how a function/class/pattern is used elsewhere in the codebase\n\
-            - Read related files to understand context\n\
-            - Verify your assumptions about the code\n\n\
+            ## IMPORTANT: Tool Usage Requirements\n\
+            You MUST use tools before providing your final analysis. Specifically:\n\
+            1. For each significant finding, use `search_repo` or `read_file` to verify how \
+               the affected code is used elsewhere in the codebase\n\
+            2. Check related files to understand the full context of changes\n\
+            3. Look for existing patterns that the PR should follow or is breaking\n\n\
+            Do NOT skip tool calls and guess — investigate first, then analyze.\n\
             After using tools, provide your final analysis in the expected JSON format.",
             base_system_prompt
         );
@@ -892,13 +895,16 @@ impl Orchestrator {
         // Enhance system prompt with tool instructions
         let system_prompt = format!(
             "{}\n\n## Available Tools\n\
-            You have access to the following tools to help analyze this PR:\n\
+            You have access to the following tools to investigate the codebase:\n\
             - `search_repo`: Search for patterns in the codebase using regex\n\
             - `read_file`: Read the contents of specific files\n\n\
-            Use these tools when you need to:\n\
-            - Find how a function/class/pattern is used elsewhere in the codebase\n\
-            - Read related files to understand context\n\
-            - Verify your assumptions about the code\n\n\
+            ## IMPORTANT: Tool Usage Requirements\n\
+            You MUST use tools before providing your final analysis. Specifically:\n\
+            1. For each significant finding, use `search_repo` or `read_file` to verify how \
+               the affected code is used elsewhere in the codebase\n\
+            2. Check related files to understand the full context of changes\n\
+            3. Look for existing patterns that the PR should follow or is breaking\n\n\
+            Do NOT skip tool calls and guess — investigate first, then analyze.\n\
             After using tools, provide your final analysis in the expected JSON format.",
             base_system_prompt
         );
